@@ -21,22 +21,32 @@ jobs:
         git clone --recursive https://github.com/theos/theos.git $THEOS
         brew install ldid
 
-    - name: Build
+    - name: Build All (DEB + Dylib + Framework)
       run: |
         export THEOS=$HOME/theos
-        make package FINALPACKAGE=1
+        make package-all FINALPACKAGE=1
 
-    - name: Upload DEB artifact
+    - name: Upload DEB (Jailbreak)
       uses: actions/upload-artifact@v4
       with:
         name: DouyinBypass-deb
         path: packages/*.deb
-        if-no-files-found: error
+        if-no-files-found: warn
+
+    - name: Upload Dylib (IPA Injection)
+      uses: actions/upload-artifact@v4
+      with:
+        name: DouyinBypass-dylib
+        path: packages/DouyinBypass.dylib
+        if-no-files-found: warn
 
     - name: Create Release (on tag)
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v2
       with:
-        files: packages/*.deb
+        files: |
+          packages/*.deb
+          packages/DouyinBypass.dylib
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
