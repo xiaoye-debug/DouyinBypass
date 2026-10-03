@@ -1,0 +1,43 @@
+name: Build DouyinBypass
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Setup Theos
+      run: |
+        export THEOS=$HOME/theos
+        git clone --recursive https://github.com/theos/theos.git $THEOS
+        # Install ldid for code signing
+        brew install ldid
+    
+    - name: Build
+      run: |
+        export THEOS=$HOME/theos
+        make package FINALPACKAGE=1
+    
+    - name: Upload DEB artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: DouyinBypass-deb
+        path: packages/*.deb
+        if-no-files-found: error
+    
+    - name: Create Release (on tag)
+      if: startsWith(github.ref, "refs/tags/")
+      uses: softprops/action-gh-release@v2
+      with:
+        files: packages/*.deb
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

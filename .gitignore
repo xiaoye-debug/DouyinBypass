@@ -1,0 +1,16 @@
+# Theos build artifacts
+.theos/
+obj/
+packages/
+*.deb
+*.dylib
+*.dsym
+*.dsym.zip
+
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcuserdata
