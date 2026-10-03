@@ -3,6 +3,6 @@ Name: DouyinBypass
 Depends: mobilesubstrate
 Version: 1.0.0
 Architecture: iphoneos-arm
-Description: Bypass Douyin version check and resign detection for iOS 27 self-signed IPA
+Description: Bypass Douyin/Douyin Lite version check and resign detection for iOS 27 self-signed IPA
 Author: LocalDev
 Section: Tweaks

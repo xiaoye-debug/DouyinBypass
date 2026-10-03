@@ -4,6 +4,7 @@
 
 // DouyinBypass v1.0.0
 // Target: com.ss.iphone.ugc.Aweme (Douyin 40.4.0)
+//        com.ss.iphone.ugc.aweme.lite (Douyin Lite)
 // Bypass version check and resign detection for iOS 27 self-signed IPA
 
 #define LOG_TAG @"[DouyinBypass]"

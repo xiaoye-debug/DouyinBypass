@@ -1,6 +1,6 @@
 ARCHS = arm64 arm64e
 TARGET = iphone:clang:latest:15.0
-INSTALL_TARGET_PROCESSES = Aweme
+INSTALL_TARGET_PROCESSES = Aweme AwemeLite
 
 include $(THEOS)/makefiles/common.mk
 
