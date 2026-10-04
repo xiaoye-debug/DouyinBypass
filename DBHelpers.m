@@ -3,336 +3,291 @@
 #import <objc/runtime.h>
 #import <substrate.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include <zlib.h>
 
-// ============================================================
-#pragma mark - Cache Directory (temp dir, like DYYY pattern)
-// ============================================================
+static NSString *DBAppDocumentsDir(void) {
+    return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+}
 
-static NSString *DBCacheDirectory(void) {
+static NSString *DBAppLibraryDir(void) {
+    return NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES).firstObject;
+}
+
+static NSString *DBCacheDir(void) {
     static NSString *dir = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSString *tmpDir = NSTemporaryDirectory();
-        if (!tmpDir) tmpDir = @"/tmp";
-        dir = [tmpDir stringByAppendingPathComponent:@"DouyinBypass"];
+        NSString *tmp = NSTemporaryDirectory();
+        if (!tmp) tmp = @"/tmp";
+        dir = [tmp stringByAppendingPathComponent:@"DouyinBypass"];
         [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-        DBLog(@"Cache dir: %@", dir);
     });
     return dir;
 }
 
-NSString *DBGetBackupDir(void) {
-    return DBCacheDirectory();
+NSString *DBGetBackupDir(void) { return DBCacheDir(); }
+
+static NSArray *DBDocumentsIncludePaths(void) {
+    return @[
+        @"ttaccountSDKUserInfo.archiver", @"ttaccount_token_guard_data.archiver",
+        @"tt_net_config.config", @"hostcache_v1", @"hostcache_sync_v1",
+        @"bd.turing", @"bbox_acc", @"frontier_qos", @"poi_params_verify",
+        @"applog.tttracker", @"kBDUGLocationCachePathName",
+        @"Aweme.db", @"Aweme.db-shm", @"Aweme.db-wal",
+        @"DBWorkspace", @"UserProfile", @"mmkv",
+        @"kBDUGDeviceUnionCachePathname", @"BDUGFlowCacheManagerPathName",
+        @"BDUGSyncSDK_kDocument", @"TIMXSDKWorkplace", @"IMFTS",
+        @"AWEIMRoot/attachment", @"AWEIMRoot/Share",
+        @"AWEIMRoot/IMUser", @"AWEIMRoot/UsersRoot",
+        @"AWEIMRoot/incentive_chat_store_v2"
+    ];
 }
 
-// ============================================================
-#pragma mark - Account Data Extraction (with crash protection)
-// ============================================================
+static NSArray *DBLibraryIncludePaths(void) {
+    return @[
+        @"loginData.dat", @"defaults.db", @"BDXBridgeAuthConfig",
+        @"passportStorage", @"Cookies", @"Pitaya", @"tma", @"tmaABTest",
+        @"alog", @"StarkContainer", @"AWEOfflineCenter", @"Jato",
+        @"LaunchCache", @"IESWebViewMonitorX", @"AWEFeedCacheData",
+        @"unisus/plugins", @"SyncedPreferences", @"unisus/settings", @"unisus/cloud",
+        @"AWEIMRoot/IMUser", @"AWEIMRoot/UsersRoot",
+        @"AWEIMRoot/incentive_chat_store_v2", @"AWEIMRoot/Sticker",
+        @"AWEDataLayer/Data/Shared/Value", @"PIAMMKV",
+        @"AWEStorage/FilePermanent",
+        @"AWEStorage/UnifyStorage.sqlite", @"AWEStorage/UnifyStorage.sqlite-shm", @"AWEStorage/UnifyStorage.sqlite-wal",
+        @"Preferences/BDXBridgeStorage.plist",
+        @"Preferences/com.apple.AppAttest.client.plist",
+        @"Preferences/com.apple.AdSupport.plist",
+        @"Preferences/com.ss.iphone.ugc.Aweme.plist",
+        @"Preferences/group.com.ss.iphone.ugc.Aweme.extension.plist",
+        @"HTTPStorages/com.ss.iphone.ugc.Aweme",
+        @"Preferences/bullet-133479643231288.plist"
+    ];
+}
 
-NSDictionary *DBExtractAccountData(void) {
-    NSMutableDictionary *data = [NSMutableDictionary dictionary];
-
-    @try {
-        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        NSArray *accountKeys = @[
-            @"session_key", @"session_secret", @"uid", @"user_id",
-            @"device_id", @"install_id", @"iid", @"aid",
-            @"tt_token", @"access_token", @"refresh_token",
-            @"login_type", @"login_time", @"bind_phone",
-            @"nickname", @"avatar_url", @"sec_uid",
-            @"unique_id", @"short_id", @"account_sdk_source",
-            @"ss_region_code", @"ss_mcc_mnc", @"ss_carrier_region",
-            @"app_language", @"channel", @"update_version_code",
-            @"last_login_uid", @"last_login_type"
-        ];
-        NSMutableDictionary *udData = [NSMutableDictionary dictionary];
-        for (NSString *key in accountKeys) {
-            id val = [defaults objectForKey:key];
-            if (val) udData[key] = val;
-        }
-        NSDictionary *allUD = [defaults dictionaryRepresentation];
-        for (NSString *key in allUD.allKeys) {
-            NSString *lower = key.lowercaseString;
-            if ([lower containsString:@"session"] || [lower containsString:@"token"] ||
-                [lower containsString:@"login"] || [lower containsString:@"account"] ||
-                [lower containsString:@"uid"] || [lower containsString:@"device"] ||
-                [lower containsString:@"cookie"] || [lower containsString:@"auth"]) {
-                if (!udData[key]) udData[key] = allUD[key];
-            }
-        }
-        data[@"userDefaults"] = udData;
-    } @catch (NSException *e) {
-        DBLog(@"UserDefaults exception: %@", e);
-        data[@"userDefaults"] = @{};
-    }
-
-    @try {
-        NSMutableArray *keychainItems = [NSMutableArray array];
-        NSArray *secClasses = @[(__bridge id)kSecClassGenericPassword,
-                                (__bridge id)kSecClassInternetPassword];
-        for (id secClass in secClasses) {
-            NSDictionary *query = @{
-                (__bridge id)kSecClass: secClass,
-                (__bridge id)kSecReturnAttributes: @YES,
-                (__bridge id)kSecReturnData: @YES,
-                (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
-            };
-            CFTypeRef result = NULL;
-            OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-            if (status == errSecSuccess && result) {
-                NSArray *items = (__bridge_transfer NSArray *)result;
-                for (NSDictionary *item in items) {
-                    NSString *svc = item[(__bridge id)kSecAttrService] ?: @"";
-                    NSString *acct = item[(__bridge id)kSecAttrAccount] ?: @"";
-                    NSData *d = item[(__bridge id)kSecValueData];
-                    NSString *lowerSvc = svc.lowercaseString;
-                    BOOL relevant = [lowerSvc containsString:@"douyin"] || [lowerSvc containsString:@"aweme"] ||
-                                    [lowerSvc containsString:@"bytedance"] || [lowerSvc containsString:@"toutiao"] ||
-                                    [lowerSvc containsString:@"tiktok"] || [lowerSvc containsString:@"ss_"];
-                    if (relevant && d.length > 0) {
-                        [keychainItems addObject:@{
-                            @"service": svc ?: @"",
-                            @"account": acct ?: @"",
-                            @"data_base64": [d base64EncodedStringWithOptions:0] ?: @"",
-                            @"class": [secClass isKindOfClass:[NSString class]] ? secClass : ([secClass description] ?: @"")
-                        }];
-                    }
+static NSInteger DBCopyFilesFromRoot(NSString *rootDir, NSArray *includePaths, NSString *destDir, NSString *prefix) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSInteger count = 0;
+    for (NSString *relPath in includePaths) {
+        NSString *srcPath = [rootDir stringByAppendingPathComponent:relPath];
+        NSString *dstPath = [destDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@/%@", prefix, relPath]];
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:srcPath isDirectory:&isDir]) continue;
+        if (isDir) {
+            [fm createDirectoryAtPath:dstPath withIntermediateDirectories:YES attributes:nil error:nil];
+            NSDirectoryEnumerator *en = [fm enumeratorAtPath:srcPath];
+            NSString *sub;
+            while ((sub = [en nextObject])) {
+                NSString *ss = [srcPath stringByAppendingPathComponent:sub];
+                NSString *sd = [dstPath stringByAppendingPathComponent:sub];
+                BOOL sd2 = NO;
+                if ([fm fileExistsAtPath:ss isDirectory:&sd2]) {
+                    if (sd2) { [fm createDirectoryAtPath:sd withIntermediateDirectories:YES attributes:nil error:nil]; }
+                    else { [fm createDirectoryAtPath:[sd stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil]; [fm copyItemAtPath:ss toPath:sd error:nil]; count++; }
                 }
             }
+        } else {
+            [fm createDirectoryAtPath:[dstPath stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+            if ([fm copyItemAtPath:srcPath toPath:dstPath error:nil]) count++;
         }
-        data[@"keychain"] = keychainItems;
-    } @catch (NSException *e) {
-        DBLog(@"Keychain exception: %@", e);
-        data[@"keychain"] = @[];
     }
-
-    @try {
-        NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-        NSMutableArray *cookies = [NSMutableArray array];
-        for (NSHTTPCookie *cookie in storage.cookies) {
-            NSString *domain = cookie.domain.lowercaseString;
-            if ([domain containsString:@"douyin"] || [domain containsString:@"snssdk"] ||
-                [domain containsString:@"bytedance"] || [domain containsString:@"pstatp"] ||
-                [domain containsString:@"amemv"] || [domain containsString:@"ixigua"] ||
-                [domain containsString:@"toutiao"] || [domain containsString:@"byteimg"]) {
-                [cookies addObject:@{
-                    @"name": cookie.name, @"value": cookie.value,
-                    @"domain": cookie.domain, @"path": cookie.path ?: @"/",
-                    @"secure": @(cookie.isSecure),
-                    @"expiresDate": cookie.expiresDate ? @([cookie.expiresDate timeIntervalSince1970]) : @(-1)
-                }];
-            }
-        }
-        data[@"cookies"] = cookies;
-    } @catch (NSException *e) {
-        DBLog(@"Cookie exception: %@", e);
-        data[@"cookies"] = @[];
-    }
-
-    @try {
-        data[@"metadata"] = @{
-            @"exportTime": @([[NSDate date] timeIntervalSince1970]),
-            @"appVersion": [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"unknown",
-            @"bundleId": [[NSBundle mainBundle] bundleIdentifier] ?: @"unknown",
-            @"deviceModel": [[UIDevice currentDevice] model] ?: @"unknown",
-            @"systemVersion": [[UIDevice currentDevice] systemVersion] ?: @"unknown"
-        };
-    } @catch (NSException *e) {
-        DBLog(@"Metadata exception: %@", e);
-        data[@"metadata"] = @{};
-    }
-
-    DBLog(@"Extracted: UD=%lu KC=%lu CK=%lu",
-          (unsigned long)[data[@"userDefaults"] count],
-          (unsigned long)[data[@"keychain"] count],
-          (unsigned long)[data[@"cookies"] count]);
-    return [data copy];
+    return count;
 }
 
-// ============================================================
-#pragma mark - Export (JSON to temp, then document picker)
-// ============================================================
-
-NSString *DBPrepareExportJson(void) {
-    @try {
-        NSString *cacheDir = DBCacheDirectory();
-        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-        [formatter setDateFormat:@"yyyyMMdd_HHmmss"];
-        NSString *timestamp = [formatter stringFromDate:[NSDate date]];
-        NSString *fileName = [NSString stringWithFormat:@"DouyinAccount_%@.json", timestamp];
-        NSString *filePath = [cacheDir stringByAppendingPathComponent:fileName];
-
-        NSDictionary *accountData = DBExtractAccountData();
-
-        // Validate JSON serializability and sanitize if needed
-        if (![NSJSONSerialization isValidJSONObject:accountData]) {
-            DBLog(@"Data not directly JSON-serializable, sanitizing...");
-            NSMutableDictionary *clean = [NSMutableDictionary dictionary];
-            for (NSString *key in accountData) {
-                id val = accountData[key];
-                if ([NSJSONSerialization isValidJSONObject:val]) {
-                    clean[key] = val;
-                } else if ([val isKindOfClass:[NSDictionary class]]) {
-                    NSMutableDictionary *cleanSub = [NSMutableDictionary dictionary];
-                    for (NSString *subKey in val) {
-                        id subVal = val[subKey];
-                        if ([NSJSONSerialization isValidJSONObject:subVal]) {
-                            cleanSub[subKey] = subVal;
-                        } else {
-                            cleanSub[subKey] = [subVal description] ?: @"";
-                        }
-                    }
-                    clean[key] = cleanSub;
-                } else if ([val isKindOfClass:[NSArray class]]) {
-                    NSMutableArray *cleanArr = [NSMutableArray array];
-                    for (id item in val) {
-                        if ([NSJSONSerialization isValidJSONObject:item]) {
-                            [cleanArr addObject:item];
-                        } else if ([item isKindOfClass:[NSDictionary class]]) {
-                            NSMutableDictionary *cleanItem = [NSMutableDictionary dictionary];
-                            for (NSString *ik in item) {
-                                id iv = item[ik];
-                                cleanItem[ik] = [NSJSONSerialization isValidJSONObject:iv] ? iv : ([iv description] ?: @"");
-                            }
-                            [cleanArr addObject:cleanItem];
-                        }
-                    }
-                    clean[key] = cleanArr;
-                } else {
-                    clean[key] = [val description] ?: @"";
-                }
-            }
-            accountData = clean;
+static NSInteger DBRestoreFilesToRoot(NSString *srcDir, NSString *rootDir, NSString *prefix) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *prefixDir = [srcDir stringByAppendingPathComponent:prefix];
+    if (![fm fileExistsAtPath:prefixDir]) return 0;
+    NSInteger count = 0;
+    NSDirectoryEnumerator *en = [fm enumeratorAtPath:prefixDir];
+    NSString *rel;
+    while ((rel = [en nextObject])) {
+        NSString *sp = [prefixDir stringByAppendingPathComponent:rel];
+        NSString *dp = [rootDir stringByAppendingPathComponent:rel];
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:sp isDirectory:&isDir]) {
+            if (isDir) { [fm createDirectoryAtPath:dp withIntermediateDirectories:YES attributes:nil error:nil]; }
+            else { [fm createDirectoryAtPath:[dp stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil]; [fm removeItemAtPath:dp error:nil]; if ([fm copyItemAtPath:sp toPath:dp error:nil]) count++; }
         }
-
-        NSError *err = nil;
-        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:accountData options:NSJSONWritingPrettyPrinted error:&err];
-        if (!jsonData) { DBLog(@"JSON serialization failed: %@", err); return nil; }
-
-        BOOL written = [jsonData writeToFile:filePath atomically:YES];
-        if (!written) { DBLog(@"Failed to write JSON to: %@", filePath); return nil; }
-
-        DBLog(@"Export prepared: %@", filePath);
-        return filePath;
-    } @catch (NSException *e) {
-        DBLog(@"Export exception: %@", e);
-        return nil;
     }
+    return count;
 }
 
-// ============================================================
-#pragma mark - Import (JSON file)
-// ============================================================
+static void DBW16(FILE *f, uint16_t v) { fwrite(&v, 2, 1, f); }
+static void DBW32(FILE *f, uint32_t v) { fwrite(&v, 4, 1, f); }
 
-BOOL DBImportAccountFromPath(NSString *filePath) {
-    @try {
-        NSFileManager *fm = [NSFileManager defaultManager];
-        if (![fm fileExistsAtPath:filePath]) return NO;
+typedef struct { char name[512]; uint32_t offset, size, crc; uint16_t nameLen; } DBZipEntry;
 
-        NSData *jsonData = [NSData dataWithContentsOfFile:filePath];
-        if (!jsonData) return NO;
-
-        NSError *err = nil;
-        NSDictionary *accountData = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&err];
-        if (!accountData) { DBLog(@"JSON parse failed: %@", err); return NO; }
-
-        NSDictionary *udData = accountData[@"userDefaults"];
-        if ([udData isKindOfClass:[NSDictionary class]]) {
-            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-            for (NSString *key in udData) [defaults setObject:udData[key] forKey:key];
-            [defaults synchronize];
-        }
-
-        NSArray *kcItems = accountData[@"keychain"];
-        if ([kcItems isKindOfClass:[NSArray class]]) {
-            for (NSDictionary *item in kcItems) {
-                NSString *svc = item[@"service"];
-                NSString *acct = item[@"account"];
-                NSData *d = [[NSData alloc] initWithBase64EncodedString:item[@"data_base64"] options:0];
-                id secClass = item[@"class"];
-                if (!svc || !d) continue;
-                NSDictionary *delQ = @{(__bridge id)kSecClass: secClass, (__bridge id)kSecAttrService: svc, (__bridge id)kSecAttrAccount: acct};
-                SecItemDelete((__bridge CFDictionaryRef)delQ);
-                NSMutableDictionary *addQ = [@{(__bridge id)kSecClass: secClass, (__bridge id)kSecAttrService: svc,
-                                               (__bridge id)kSecAttrAccount: acct, (__bridge id)kSecValueData: d} mutableCopy];
-                addQ[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
-                SecItemAdd((__bridge CFDictionaryRef)addQ, NULL);
-            }
-        }
-
-        NSArray *cookieData = accountData[@"cookies"];
-        if ([cookieData isKindOfClass:[NSArray class]]) {
-            NSHTTPCookieStorage *ckStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-            for (NSDictionary *cd in cookieData) {
-                NSMutableDictionary *props = [NSMutableDictionary dictionary];
-                props[NSHTTPCookieName] = cd[@"name"];
-                props[NSHTTPCookieValue] = cd[@"value"];
-                props[NSHTTPCookieDomain] = cd[@"domain"];
-                props[NSHTTPCookiePath] = cd[@"path"] ?: @"/";
-                if ([cd[@"secure"] boolValue]) props[NSHTTPCookieSecure] = @"TRUE";
-                double exp = [cd[@"expiresDate"] doubleValue];
-                if (exp > 0) props[NSHTTPCookieExpires] = [NSDate dateWithTimeIntervalSince1970:exp];
-                NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
-                if (cookie) [ckStorage setCookie:cookie];
-            }
-        }
-
-        DBLog(@"Import complete from: %@", filePath);
-        return YES;
-    } @catch (NSException *e) {
-        DBLog(@"Import exception: %@", e);
-        return NO;
+static BOOL DBCreateZip(NSString *srcDir, NSString *dstZip) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    FILE *zf = fopen([dstZip UTF8String], "wb");
+    if (!zf) return NO;
+    NSMutableArray *entries = [NSMutableArray array];
+    NSDirectoryEnumerator *en = [fm enumeratorAtPath:srcDir];
+    NSString *rel;
+    while ((rel = [en nextObject])) {
+        NSString *fp = [srcDir stringByAppendingPathComponent:rel];
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:fp isDirectory:&isDir] || isDir) continue;
+        NSData *d = [NSData dataWithContentsOfFile:fp];
+        if (!d) continue;
+        DBZipEntry e; memset(&e, 0, sizeof(e));
+        strncpy(e.name, [rel UTF8String], sizeof(e.name)-1);
+        e.nameLen = (uint16_t)strlen(e.name);
+        e.size = (uint32_t)d.length;
+        e.crc = (uint32_t)crc32(crc32(0L, Z_NULL, 0), (const Bytef *)d.bytes, (uInt)d.length);
+        e.offset = (uint32_t)ftell(zf);
+        DBW32(zf, 0x04034b50); DBW16(zf, 20); DBW16(zf, 0); DBW16(zf, 0);
+        DBW16(zf, 0); DBW16(zf, 0);
+        DBW32(zf, e.crc); DBW32(zf, e.size); DBW32(zf, e.size);
+        DBW16(zf, e.nameLen); DBW16(zf, 0);
+        fwrite(e.name, 1, e.nameLen, zf);
+        fwrite(d.bytes, 1, d.length, zf);
+        [entries addObject:[NSValue valueWithBytes:&e objCType:@encode(DBZipEntry)]];
     }
-}
-
-// ============================================================
-#pragma mark - Bypass Hooks (runtime)
-// ============================================================
-
-static BOOL _db_isAppStoreChannel(id self, SEL _cmd) {
+    uint32_t cdOff = (uint32_t)ftell(zf);
+    for (NSValue *v in entries) {
+        DBZipEntry e; [v getValue:&e];
+        DBW32(zf, 0x02014b50); DBW16(zf, 20); DBW16(zf, 20); DBW16(zf, 0); DBW16(zf, 0);
+        DBW16(zf, 0); DBW16(zf, 0);
+        DBW32(zf, e.crc); DBW32(zf, e.size); DBW32(zf, e.size);
+        DBW16(zf, e.nameLen); DBW16(zf, 0); DBW16(zf, 0); DBW16(zf, 0); DBW16(zf, 0);
+        DBW32(zf, 0); DBW32(zf, e.offset);
+        fwrite(e.name, 1, e.nameLen, zf);
+    }
+    uint32_t cdSz = (uint32_t)ftell(zf) - cdOff;
+    DBW32(zf, 0x06054b50); DBW16(zf, 0); DBW16(zf, 0);
+    DBW16(zf, (uint16_t)entries.count); DBW16(zf, (uint16_t)entries.count);
+    DBW32(zf, cdSz); DBW32(zf, cdOff); DBW16(zf, 0);
+    fclose(zf);
+    DBLog(@"ZIP created: %lu files", (unsigned long)entries.count);
     return YES;
 }
 
+static BOOL DBExtractZip(NSString *zipPath, NSString *dstDir) {
+    FILE *zf = fopen([zipPath UTF8String], "rb");
+    if (!zf) return NO;
+    fseek(zf, 0, SEEK_END);
+    long fsz = ftell(zf);
+    long ss = fsz - 65557; if (ss < 0) ss = 0;
+    uint8_t *buf = (uint8_t *)malloc(fsz - ss);
+    fseek(zf, ss, SEEK_SET);
+    fread(buf, 1, fsz - ss, zf);
+    long eo = -1;
+    for (long i = (fsz-ss)-22; i >= 0; i--) {
+        if (buf[i]==0x50 && buf[i+1]==0x4b && buf[i+2]==0x05 && buf[i+3]==0x06) { eo = ss+i; break; }
+    }
+    free(buf);
+    if (eo < 0) { fclose(zf); return NO; }
+    fseek(zf, eo+10, SEEK_SET);
+    uint16_t tot; fread(&tot, 2, 1, zf);
+    fseek(zf, 6, SEEK_CUR);
+    uint32_t cdOff; fread(&cdOff, 4, 1, zf);
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:dstDir withIntermediateDirectories:YES attributes:nil error:nil];
+    fseek(zf, cdOff, SEEK_SET);
+    for (int i = 0; i < tot; i++) {
+        uint32_t sig; fread(&sig, 4, 1, zf);
+        if (sig != 0x02014b50) break;
+        fseek(zf, 16, SEEK_CUR);
+        uint32_t csz; fread(&csz, 4, 1, zf);
+        fseek(zf, 4, SEEK_CUR);
+        uint16_t nl, el, cl;
+        fread(&nl, 2, 1, zf); fread(&el, 2, 1, zf); fread(&cl, 2, 1, zf);
+        fseek(zf, 8, SEEK_CUR);
+        uint32_t lho; fread(&lho, 4, 1, zf);
+        char nm[1024] = {0}; fread(nm, 1, nl, zf);
+        fseek(zf, el+cl, SEEK_CUR);
+        long sv = ftell(zf);
+        fseek(zf, lho+26, SEEK_SET);
+        uint16_t lnl, lel; fread(&lnl, 2, 1, zf); fread(&lel, 2, 1, zf);
+        fseek(zf, lnl+lel, SEEK_CUR);
+        if (csz > 0) {
+            uint8_t *dd = (uint8_t *)malloc(csz);
+            fread(dd, 1, csz, zf);
+            NSString *op = [dstDir stringByAppendingPathComponent:[NSString stringWithUTF8String:nm]];
+            [fm createDirectoryAtPath:[op stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+            FILE *of = fopen([op UTF8String], "wb");
+            if (of) { fwrite(dd, 1, csz, of); fclose(of); }
+            free(dd);
+        }
+        fseek(zf, sv, SEEK_SET);
+    }
+    fclose(zf);
+    DBLog(@"ZIP extracted: %d files", tot);
+    return YES;
+}
+
+NSString *DBPrepareExportJson(void) {
+    @try {
+        NSString *cacheDir = DBCacheDir();
+        NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+        [fmt setDateFormat:@"yyyyMMdd_HHmmss"];
+        NSString *ts = [fmt stringFromDate:[NSDate date]];
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"unknown";
+        NSString *ver = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"unknown";
+        NSString *zipName = [NSString stringWithFormat:@"DouyinAccount_%@_%@_%@.zip", bid, ver, ts];
+        NSString *zipPath = [cacheDir stringByAppendingPathComponent:zipName];
+        NSString *stageDir = [cacheDir stringByAppendingPathComponent:[NSString stringWithFormat:@"stage_%@", ts]];
+        [[NSFileManager defaultManager] createDirectoryAtPath:stageDir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSInteger dc = DBCopyFilesFromRoot(DBAppDocumentsDir(), DBDocumentsIncludePaths(), stageDir, @"Documents");
+        NSInteger lc = DBCopyFilesFromRoot(DBAppLibraryDir(), DBLibraryIncludePaths(), stageDir, @"Library");
+        DBLog(@"Staged: Docs=%ld Lib=%ld", (long)dc, (long)lc);
+        NSDictionary *manifest = @{
+            @"format": @"douyinbypass_account_backup_v1",
+            @"created_at": @([[NSDate date] timeIntervalSince1970]),
+            @"app_version": ver, @"bundle_id": bid,
+            @"documents_file_count": @(dc), @"library_file_count": @(lc)
+        };
+        NSData *md = [NSJSONSerialization dataWithJSONObject:manifest options:NSJSONWritingPrettyPrinted error:nil];
+        [md writeToFile:[stageDir stringByAppendingPathComponent:@"manifest.json"] atomically:YES];
+        BOOL ok = DBCreateZip(stageDir, zipPath);
+        [[NSFileManager defaultManager] removeItemAtPath:stageDir error:nil];
+        if (!ok) return nil;
+        DBLog(@"Export: %@ (%ld files)", zipPath, (long)(dc+lc));
+        return zipPath;
+    } @catch (NSException *e) { DBLog(@"Export exc: %@", e); return nil; }
+}
+
+BOOL DBImportAccountFromPath(NSString *filePath) {
+    @try {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:filePath]) return NO;
+        NSString *extDir = [DBCacheDir() stringByAppendingPathComponent:@"import_extract"];
+        [[NSFileManager defaultManager] removeItemAtPath:extDir error:nil];
+        if (!DBExtractZip(filePath, extDir)) return NO;
+        NSInteger dc = DBRestoreFilesToRoot(extDir, DBAppDocumentsDir(), @"Documents");
+        NSInteger lc = DBRestoreFilesToRoot(extDir, DBAppLibraryDir(), @"Library");
+        [[NSFileManager defaultManager] removeItemAtPath:extDir error:nil];
+        DBLog(@"Import: Docs=%ld Lib=%ld", (long)dc, (long)lc);
+        return (dc+lc) > 0;
+    } @catch (NSException *e) { DBLog(@"Import exc: %@", e); return NO; }
+}
+
+static BOOL _db_isAppStoreChannel(id self, SEL _cmd) { return YES; }
+
 void DBHookIsAppStoreChannel(void) {
-    NSArray *classNames = @[
-        @"AWEAppEnvironment", @"AWESecUserModel", @"AWEConfigManager",
-        @"BDUGCloudkitManager", @"AWEAppStoreMediator", @"TTAccountSDKSetup"
-    ];
-    for (NSString *clsName in classNames) {
-        Class cls = NSClassFromString(clsName);
-        if (cls && [cls instancesRespondToSelector:@selector(isAppStoreChannel)]) {
-            MSHookMessageEx(cls, @selector(isAppStoreChannel), (IMP)_db_isAppStoreChannel, NULL);
-            DBLog(@"Hooked isAppStoreChannel on %@", clsName);
-        }
-        if (cls && [cls respondsToSelector:@selector(isAppStoreChannel)]) {
-            MSHookMessageEx(object_getClass(cls), @selector(isAppStoreChannel), (IMP)_db_isAppStoreChannel, NULL);
-            DBLog(@"Hooked +isAppStoreChannel on %@", clsName);
-        }
+    NSArray *names = @[@"AWEAppEnvironment", @"AWESecUserModel", @"AWEConfigManager",
+                       @"BDUGCloudkitManager", @"AWEAppStoreMediator", @"TTAccountSDKSetup"];
+    for (NSString *n in names) {
+        Class c = NSClassFromString(n);
+        if (c && [c instancesRespondToSelector:@selector(isAppStoreChannel)])
+            MSHookMessageEx(c, @selector(isAppStoreChannel), (IMP)_db_isAppStoreChannel, NULL);
+        if (c && [c respondsToSelector:@selector(isAppStoreChannel)])
+            MSHookMessageEx(object_getClass(c), @selector(isAppStoreChannel), (IMP)_db_isAppStoreChannel, NULL);
     }
 }
 
 typedef void (^DBBoolCompletion)(BOOL);
 typedef void (^DBIdCompletion)(id);
-
-static void _db_openURL(id self, SEL _cmd, NSURL *url, DBBoolCompletion completion) {
-    if (completion) completion(YES);
-}
-
-static void _db_initSKStore(id self, SEL _cmd, DBIdCompletion completion) {
-    if (completion) completion(nil);
-}
+static void _db_openURL(id s, SEL c, NSURL *u, DBBoolCompletion cb) { if (cb) cb(YES); }
+static void _db_initSK(id s, SEL c, DBIdCompletion cb) { if (cb) cb(nil); }
 
 void DBHookAppStoreMediator(void) {
-    Class cls = NSClassFromString(@"AWEAppStoreMediator");
-    if (!cls) return;
-    MSHookMessageEx(cls, @selector(openURL:completion:), (IMP)_db_openURL, NULL);
-    MSHookMessageEx(cls, @selector(initSKStoreProductVCWithCompletion:), (IMP)_db_initSKStore, NULL);
-    DBLog(@"Hooked AWEAppStoreMediator openURL + initSKStore");
+    Class c = NSClassFromString(@"AWEAppStoreMediator");
+    if (!c) return;
+    MSHookMessageEx(c, @selector(openURL:completion:), (IMP)_db_openURL, NULL);
+    MSHookMessageEx(c, @selector(initSKStoreProductVCWithCompletion:), (IMP)_db_initSK, NULL);
 }
-
-// ============================================================
-#pragma mark - Document Picker Delegate (DYYY pattern)
-// ============================================================
 
 @interface DBDocumentPickerDelegate : NSObject <UIDocumentPickerDelegate>
 @property(nonatomic, copy) void (^completionBlock)(NSURL *url);
@@ -340,42 +295,26 @@ void DBHookAppStoreMediator(void) {
 @end
 
 @implementation DBDocumentPickerDelegate
-
-- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    if (urls.count > 0 && self.completionBlock) {
-        self.completionBlock(urls.firstObject);
-    }
+- (void)documentPicker:(UIDocumentPickerViewController *)c didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (urls.count > 0 && self.completionBlock) self.completionBlock(urls.firstObject);
     [self cleanupTempFile];
 }
-
-- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
-    [self cleanupTempFile];
-}
-
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)c { [self cleanupTempFile]; }
 - (void)cleanupTempFile {
-    if (self.tempFilePath && [[NSFileManager defaultManager] fileExistsAtPath:self.tempFilePath]) {
+    if (self.tempFilePath && [[NSFileManager defaultManager] fileExistsAtPath:self.tempFilePath])
         [[NSFileManager defaultManager] removeItemAtPath:self.tempFilePath error:nil];
-    }
 }
-
 @end
 
-// ============================================================
-#pragma mark - Settings Panel & Entry Item (DY-tools pattern)
-// ============================================================
-
-static UIViewController *DBTopViewController(void) {
-    UIWindow *window = nil;
-    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (scene.activationState == UISceneActivationStateForegroundActive) {
-            for (UIWindow *w in scene.windows) {
-                if (w.isKeyWindow) { window = w; break; }
-            }
-        }
-        if (window) break;
+static UIViewController *DBTopVC(void) {
+    UIWindow *w = nil;
+    for (UIWindowScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if (s.activationState == UISceneActivationStateForegroundActive)
+            for (UIWindow *ww in s.windows) { if (ww.isKeyWindow) { w = ww; break; } }
+        if (w) break;
     }
-    if (!window) window = [UIApplication sharedApplication].keyWindow;
-    UIViewController *vc = window.rootViewController;
+    if (!w) w = [UIApplication sharedApplication].keyWindow;
+    UIViewController *vc = w.rootViewController;
     while (vc.presentedViewController) vc = vc.presentedViewController;
     return vc;
 }
@@ -383,184 +322,152 @@ static UIViewController *DBTopViewController(void) {
 void DBPresentControlPanel(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            UIViewController *presenter = DBTopViewController();
-            if (!presenter) return;
+            UIViewController *p = DBTopVC();
+            if (!p) return;
+            UIAlertController *panel = [UIAlertController alertControllerWithTitle:@"DouyinBypass 账号管理" message:@"选择操作" preferredStyle:UIAlertControllerStyleActionSheet];
 
-            UIAlertController *panel = [UIAlertController alertControllerWithTitle:@"DouyinBypass 账号管理"
-                message:@"选择操作" preferredStyle:UIAlertControllerStyleActionSheet];
-
-            // Export: write JSON to temp, then use UIDocumentPickerViewController to let user pick save location
             [panel addAction:[UIAlertAction actionWithTitle:@"导出当前账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                NSString *tempFilePath = DBPrepareExportJson();
-                if (!tempFilePath) {
-                    UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导出失败" message:@"无法生成账号数据" preferredStyle:UIAlertControllerStyleAlert];
-                    [err addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                    [DBTopViewController() presentViewController:err animated:YES completion:nil];
-                    return;
+                NSString *tmp = DBPrepareExportJson();
+                if (!tmp) {
+                    UIAlertController *e = [UIAlertController alertControllerWithTitle:@"导出失败" message:@"无法生成账号数据" preferredStyle:UIAlertControllerStyleAlert];
+                    [e addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                    [DBTopVC() presentViewController:e animated:YES completion:nil]; return;
                 }
-
-                NSURL *tempFileURL = [NSURL fileURLWithPath:tempFilePath];
-                // Use the same API as DYYY: initWithURLs:inMode:UIDocumentPickerModeExportToService
+                NSURL *u = [NSURL fileURLWithPath:tmp];
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-                UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initWithURLs:@[tempFileURL] inMode:UIDocumentPickerModeExportToService];
+                UIDocumentPickerViewController *pk = [[UIDocumentPickerViewController alloc] initWithURLs:@[u] inMode:UIDocumentPickerModeExportToService];
                 #pragma clang diagnostic pop
-
                 DBDocumentPickerDelegate *del = [[DBDocumentPickerDelegate alloc] init];
-                del.tempFilePath = tempFilePath;
+                del.tempFilePath = tmp;
                 del.completionBlock = ^(NSURL *url) {
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        UIAlertController *ok = [UIAlertController alertControllerWithTitle:@"导出成功"
-                            message:[NSString stringWithFormat:@"已保存到:\n%@", url.path]
-                            preferredStyle:UIAlertControllerStyleAlert];
+                        UIAlertController *ok = [UIAlertController alertControllerWithTitle:@"导出成功" message:[NSString stringWithFormat:@"已保存到:\n%@", url.path] preferredStyle:UIAlertControllerStyleAlert];
                         [ok addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                        [DBTopViewController() presentViewController:ok animated:YES completion:nil];
+                        [DBTopVC() presentViewController:ok animated:YES completion:nil];
                     });
                 };
-
-                static char kDBPickerDelegateKey;
-                picker.delegate = del;
-                objc_setAssociatedObject(picker, &kDBPickerDelegateKey, del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-                [DBTopViewController() presentViewController:picker animated:YES completion:nil];
+                static char k1; pk.delegate = del;
+                objc_setAssociatedObject(pk, &k1, del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [DBTopVC() presentViewController:pk animated:YES completion:nil];
             }]];
 
-            // Import: let user pick a JSON file
             [panel addAction:[UIAlertAction actionWithTitle:@"导入账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-                UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.json", @"public.data"] inMode:UIDocumentPickerModeImport];
+                UIDocumentPickerViewController *pk = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"com.pkware.zip-archive", @"public.data"] inMode:UIDocumentPickerModeImport];
                 #pragma clang diagnostic pop
-
                 DBDocumentPickerDelegate *del = [[DBDocumentPickerDelegate alloc] init];
                 del.completionBlock = ^(NSURL *url) {
-                    if (!url) {
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"未选择文件" preferredStyle:UIAlertControllerStyleAlert];
-                            [err addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                            [DBTopViewController() presentViewController:err animated:YES completion:nil];
-                        });
-                        return;
-                    }
-                    BOOL ok = DBImportAccountFromPath(url.path);
+                    if (!url) return;
+                    BOOL sc = [url startAccessingSecurityScopedResource];
+                    NSString *lp = [DBCacheDir() stringByAppendingPathComponent:@"import_picked.zip"];
+                    [[NSFileManager defaultManager] removeItemAtPath:lp error:nil];
+                    NSError *ce = nil;
+                    [[NSFileManager defaultManager] copyItemAtURL:url toURL:[NSURL fileURLWithPath:lp] error:&ce];
+                    if (sc) [url stopAccessingSecurityScopedResource];
+                    if (ce) { dispatch_async(dispatch_get_main_queue(), ^{
+                        UIAlertController *e = [UIAlertController alertControllerWithTitle:@"导入失败" message:ce.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+                        [e addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                        [DBTopVC() presentViewController:e animated:YES completion:nil]; }); return; }
+                    BOOL ok = DBImportAccountFromPath(lp);
+                    [[NSFileManager defaultManager] removeItemAtPath:lp error:nil];
                     dispatch_async(dispatch_get_main_queue(), ^{
                         if (ok) {
-                            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入成功" message:@"账号信息已恢复，请重启抖音以生效。" preferredStyle:UIAlertControllerStyleAlert];
-                            [a addAction:[UIAlertAction actionWithTitle:@"立即重启" style:UIAlertActionStyleDefault handler:^(UIAlertAction *aa) { exit(0); }]];
-                            [a addAction:[UIAlertAction actionWithTitle:@"稍后重启" style:UIAlertActionStyleCancel handler:nil]];
-                            [DBTopViewController() presentViewController:a animated:YES completion:nil];
+                            UIAlertController *a2 = [UIAlertController alertControllerWithTitle:@"导入成功" message:@"账号信息已恢复，请重启抖音以生效。" preferredStyle:UIAlertControllerStyleAlert];
+                            [a2 addAction:[UIAlertAction actionWithTitle:@"立即重启" style:UIAlertActionStyleDefault handler:^(UIAlertAction *aa) { exit(0); }]];
+                            [a2 addAction:[UIAlertAction actionWithTitle:@"稍后重启" style:UIAlertActionStyleCancel handler:nil]];
+                            [DBTopVC() presentViewController:a2 animated:YES completion:nil];
                         } else {
-                            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"文件格式不正确或已损坏" preferredStyle:UIAlertControllerStyleAlert];
-                            [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                            [DBTopViewController() presentViewController:a animated:YES completion:nil];
+                            UIAlertController *a2 = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"文件格式不正确或已损坏" preferredStyle:UIAlertControllerStyleAlert];
+                            [a2 addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                            [DBTopVC() presentViewController:a2 animated:YES completion:nil];
                         }
                     });
                 };
-
-                static char kDBImportPickerDelegateKey;
-                picker.delegate = del;
-                objc_setAssociatedObject(picker, &kDBImportPickerDelegateKey, del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-                [DBTopViewController() presentViewController:picker animated:YES completion:nil];
+                static char k2; pk.delegate = del;
+                objc_setAssociatedObject(pk, &k2, del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [DBTopVC() presentViewController:pk animated:YES completion:nil];
             }]];
 
-            // Backup list
             [panel addAction:[UIAlertAction actionWithTitle:@"查看备份列表" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
                 NSFileManager *fm = [NSFileManager defaultManager];
-                NSString *cacheDir = DBCacheDirectory();
-                NSArray *files = [fm contentsOfDirectoryAtPath:cacheDir error:nil];
+                NSString *cd = DBCacheDir();
+                NSArray *fs = [fm contentsOfDirectoryAtPath:cd error:nil];
                 NSMutableArray *info = [NSMutableArray array];
-                for (NSString *f in files) {
-                    if ([f hasSuffix:@".json"]) {
-                        NSString *full = [cacheDir stringByAppendingPathComponent:f];
-                        NSDictionary *attr = [fm attributesOfItemAtPath:full error:nil];
-                        unsigned long long size = attr.fileSize;
-                        NSDate *date = attr.fileModificationDate;
-                        NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
-                        fmt.dateFormat = @"yyyy-MM-dd HH:mm";
-                        [info addObject:[NSString stringWithFormat:@"%@  (%.1f KB, %@)", f, size/1024.0, [fmt stringFromDate:date]]];
+                for (NSString *f in fs) {
+                    if ([f hasSuffix:@".zip"]) {
+                        NSDictionary *at = [fm attributesOfItemAtPath:[cd stringByAppendingPathComponent:f] error:nil];
+                        NSDateFormatter *df = [[NSDateFormatter alloc] init]; df.dateFormat = @"yyyy-MM-dd HH:mm";
+                        [info addObject:[NSString stringWithFormat:@"%@  (%.1f MB, %@)", f, at.fileSize/1024.0/1024.0, [df stringFromDate:at.fileModificationDate]]];
                     }
                 }
                 [info sortUsingSelector:@selector(compare:)];
                 NSString *msg = info.count > 0 ? [[info reverseObjectEnumerator].allObjects componentsJoinedByString:@"\n\n"] : @"暂无备份文件";
-                UIAlertController *list = [UIAlertController alertControllerWithTitle:@"备份列表" message:msg preferredStyle:UIAlertControllerStyleAlert];
-                if (info.count > 0) {
-                    [list addAction:[UIAlertAction actionWithTitle:@"清除所有备份" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *aa) {
-                        [fm removeItemAtPath:cacheDir error:nil];
-                        [fm createDirectoryAtPath:cacheDir withIntermediateDirectories:YES attributes:nil error:nil];
-                    }]];
-                }
-                [list addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
-                [DBTopViewController() presentViewController:list animated:YES completion:nil];
+                UIAlertController *l = [UIAlertController alertControllerWithTitle:@"备份列表" message:msg preferredStyle:UIAlertControllerStyleAlert];
+                if (info.count > 0) [l addAction:[UIAlertAction actionWithTitle:@"清除所有备份" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *aa) {
+                    for (NSString *f in fs) { if ([f hasSuffix:@".zip"]) [fm removeItemAtPath:[cd stringByAppendingPathComponent:f] error:nil]; }
+                }]];
+                [l addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+                [DBTopVC() presentViewController:l animated:YES completion:nil];
             }]];
 
             [panel addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-
             if (panel.popoverPresentationController) {
-                panel.popoverPresentationController.sourceView = presenter.view;
-                panel.popoverPresentationController.sourceRect = CGRectMake(presenter.view.bounds.size.width/2, presenter.view.bounds.size.height/2, 1, 1);
+                panel.popoverPresentationController.sourceView = p.view;
+                panel.popoverPresentationController.sourceRect = CGRectMake(p.view.bounds.size.width/2, p.view.bounds.size.height/2, 1, 1);
             }
-            [presenter presentViewController:panel animated:YES completion:nil];
-        } @catch (NSException *e) {
-            DBLog(@"Panel exception: %@", e);
-        }
+            [p presentViewController:panel animated:YES completion:nil];
+        } @catch (NSException *e) { DBLog(@"Panel exc: %@", e); }
     });
 }
 
 id DBMakeSettingsEntryItem(void) {
-    Class itemClass = NSClassFromString(@"AWESettingItemModel");
-    if (!itemClass) return nil;
-
-    AWESettingItemModel *item = [itemClass new];
+    Class ic = NSClassFromString(@"AWESettingItemModel");
+    if (!ic) return nil;
+    AWESettingItemModel *item = [ic new];
     item.identifier = @"DouyinBypassAccountManager";
     item.title = @"账号管理";
     item.subTitle = @"导出/导入账号登录信息";
-    item.detail = @"v2.3";
+    item.detail = @"v3.0";
     item.iconImageName = @"ic_gearsimplify_outlined_20";
     item.svgIconImageName = @"ic_gearsimplify_outlined_20";
     item.cellType = 26;
     item.colorStyle = 0;
     item.isEnable = YES;
     item.isSwitchOn = NO;
-    item.cellTappedBlock = ^{
-        DBPresentControlPanel();
-    };
+    item.cellTappedBlock = ^{ DBPresentControlPanel(); };
     return item;
 }
 
 id DBMakeSettingsSection(id entryItem) {
-    Class sectionClass = NSClassFromString(@"AWESettingSectionModel");
-    if (!sectionClass || !entryItem) return nil;
-
-    AWESettingSectionModel *section = [sectionClass new];
-    section.sectionHeaderTitle = @"DouyinBypass";
-    section.sectionHeaderHeight = 40.0;
-    section.sectionFooterTitle = @"";
-    section.type = 0;
-    section.itemArray = @[entryItem];
-    return section;
+    Class sc = NSClassFromString(@"AWESettingSectionModel");
+    if (!sc || !entryItem) return nil;
+    AWESettingSectionModel *s = [sc new];
+    s.sectionHeaderTitle = @"DouyinBypass";
+    s.sectionHeaderHeight = 40.0;
+    s.sectionFooterTitle = @"";
+    s.type = 0;
+    s.itemArray = @[entryItem];
+    return s;
 }
 
-NSArray *DBInjectSettingsSections(NSArray *originalSections) {
-    if (![originalSections isKindOfClass:[NSArray class]]) return originalSections;
-
-    for (id section in originalSections) {
+NSArray *DBInjectSettingsSections(NSArray *orig) {
+    if (![orig isKindOfClass:[NSArray class]]) return orig;
+    for (id sec in orig) {
         NSArray *items = nil;
-        @try { items = [section valueForKey:@"itemArray"]; } @catch (__unused NSException *e) {}
-        for (id item in items) {
-            NSString *identifier = nil;
-            @try { identifier = [item valueForKey:@"identifier"]; } @catch (__unused NSException *e) {}
-            if ([identifier isEqualToString:@"DouyinBypassAccountManager"]) return originalSections;
+        @try { items = [sec valueForKey:@"itemArray"]; } @catch (__unused NSException *e) {}
+        for (id it in items) {
+            NSString *ident = nil;
+            @try { ident = [it valueForKey:@"identifier"]; } @catch (__unused NSException *e) {}
+            if ([ident isEqualToString:@"DouyinBypassAccountManager"]) return orig;
         }
     }
-
     id entry = DBMakeSettingsEntryItem();
     id section = DBMakeSettingsSection(entry);
-    if (!entry || !section) return originalSections;
-
-    NSMutableArray *result = [originalSections mutableCopy];
-    if (!result) result = [NSMutableArray array];
-    [result insertObject:section atIndex:0];
-    return [result copy];
+    if (!entry || !section) return orig;
+    NSMutableArray *r = [orig mutableCopy];
+    if (!r) r = [NSMutableArray array];
+    [r insertObject:section atIndex:0];
+    return [r copy];
 }
-

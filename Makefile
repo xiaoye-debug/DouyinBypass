@@ -4,28 +4,23 @@ INSTALL_TARGET_PROCESSES = Aweme AwemeLite
 
 include $(THEOS)/makefiles/common.mk
 
-# === Tweak (DEB for jailbreak) ===
 TWEAK_NAME = DouyinBypass
 DouyinBypass_FILES = Tweak.xm DBHelpers.m
 DouyinBypass_CFLAGS = -fobjc-arc -w
 DouyinBypass_FRAMEWORKS = Foundation UIKit Security UniformTypeIdentifiers
+DouyinBypass_LIBRARIES = z
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
-# === Build dylib: copy the already-linked tweak dylib ===
 build-dylib:
 	@echo "=== Building Dylib for IPA injection ==="
 	@mkdir -p packages
 	@DYLIB=$$(find .theos/obj -name "DouyinBypass.dylib" 2>/dev/null | head -1); \
-	if [ -z "$$DYLIB" ]; then \
-		echo "[ERROR] DouyinBypass.dylib not found in .theos/obj/. Run 'make package' first."; \
-		exit 1; \
-	fi; \
+	if [ -z "$$DYLIB" ]; then echo "[ERROR] not found"; exit 1; fi; \
 	cp "$$DYLIB" packages/DouyinBypass.dylib && \
-	echo "[OK] Copied $$DYLIB -> packages/DouyinBypass.dylib" && \
+	echo "[OK] packages/DouyinBypass.dylib" && \
 	(command -v ldid >/dev/null 2>&1 && ldid -S packages/DouyinBypass.dylib || true)
 
-# Build everything: deb + dylib
 package-all: package build-dylib
 	@echo ""
 	@echo "=== Build Complete ==="
