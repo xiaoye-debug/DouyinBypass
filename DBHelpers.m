@@ -362,8 +362,6 @@ void DBPresentControlPanel(void) {
 }
 
 // Document picker delegate (separate class to avoid block-in-.xm issues)
-@interface DBDocumentPickerDelegate : NSObject <UIDocumentPickerDelegate>
-@end
 
 @implementation DBDocumentPickerDelegate
 
@@ -475,5 +473,6 @@ NSArray *DBInjectSettingsSections(NSArray *originalSections) {
     [result insertObject:section atIndex:0];
     return [result copy];
 }
+
 
 
