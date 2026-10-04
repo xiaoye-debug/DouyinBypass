@@ -116,7 +116,23 @@ static NSInteger DBRestoreFilesToRoot(NSString *srcDir, NSString *rootDir, NSStr
 static void DBW16(FILE *f, uint16_t v) { fwrite(&v, 2, 1, f); }
 static void DBW32(FILE *f, uint32_t v) { fwrite(&v, 4, 1, f); }
 
-typedef struct { char name[512]; uint32_t offset, size, crc; uint16_t nameLen; } DBZipEntry;
+typedef struct { char name[512]; uint32_t offset, size, compSize, crc; uint16_t nameLen; } DBZipEntry;
+
+static NSData *DBDeflateData(NSData *input) {
+    if (input.length == 0) return [NSData data];
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    strm.next_in = (Bytef *)input.bytes;
+    strm.avail_in = (uInt)input.length;
+    NSMutableData *out = [NSMutableData dataWithLength:deflateBound(&strm, (uLong)input.length)];
+    strm.next_out = (Bytef *)out.mutableBytes;
+    strm.avail_out = (uInt)out.length;
+    if (deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) return nil;
+    deflate(&strm, Z_FINISH);
+    deflateEnd(&strm);
+    out.length = strm.total_out;
+    return out;
+}
 
 static BOOL DBCreateZip(NSString *srcDir, NSString *dstZip) {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -131,26 +147,34 @@ static BOOL DBCreateZip(NSString *srcDir, NSString *dstZip) {
         if (![fm fileExistsAtPath:fp isDirectory:&isDir] || isDir) continue;
         NSData *d = [NSData dataWithContentsOfFile:fp];
         if (!d) continue;
+        NSData *comp = DBDeflateData(d);
+        if (!comp) comp = d; // fallback to store
+        uint16_t compMethod = (comp.length < d.length) ? 8 : 0;
+        NSData *writeData = (compMethod == 8) ? comp : d;
+
         DBZipEntry e; memset(&e, 0, sizeof(e));
         strncpy(e.name, [rel UTF8String], sizeof(e.name)-1);
         e.nameLen = (uint16_t)strlen(e.name);
         e.size = (uint32_t)d.length;
+        e.compSize = (uint32_t)writeData.length;
         e.crc = (uint32_t)crc32(crc32(0L, Z_NULL, 0), (const Bytef *)d.bytes, (uInt)d.length);
         e.offset = (uint32_t)ftell(zf);
-        DBW32(zf, 0x04034b50); DBW16(zf, 20); DBW16(zf, 0); DBW16(zf, 0);
+
+        DBW32(zf, 0x04034b50); DBW16(zf, 20); DBW16(zf, 0); DBW16(zf, compMethod);
         DBW16(zf, 0); DBW16(zf, 0);
-        DBW32(zf, e.crc); DBW32(zf, e.size); DBW32(zf, e.size);
+        DBW32(zf, e.crc); DBW32(zf, e.compSize); DBW32(zf, e.size);
         DBW16(zf, e.nameLen); DBW16(zf, 0);
         fwrite(e.name, 1, e.nameLen, zf);
-        fwrite(d.bytes, 1, d.length, zf);
+        fwrite(writeData.bytes, 1, writeData.length, zf);
         [entries addObject:[NSValue valueWithBytes:&e objCType:@encode(DBZipEntry)]];
     }
     uint32_t cdOff = (uint32_t)ftell(zf);
     for (NSValue *v in entries) {
         DBZipEntry e; [v getValue:&e];
-        DBW32(zf, 0x02014b50); DBW16(zf, 20); DBW16(zf, 20); DBW16(zf, 0); DBW16(zf, 0);
+        uint16_t cm = (e.compSize < e.size) ? 8 : 0;
+        DBW32(zf, 0x02014b50); DBW16(zf, 20); DBW16(zf, 20); DBW16(zf, 0); DBW16(zf, cm);
         DBW16(zf, 0); DBW16(zf, 0);
-        DBW32(zf, e.crc); DBW32(zf, e.size); DBW32(zf, e.size);
+        DBW32(zf, e.crc); DBW32(zf, e.compSize); DBW32(zf, e.size);
         DBW16(zf, e.nameLen); DBW16(zf, 0); DBW16(zf, 0); DBW16(zf, 0); DBW16(zf, 0);
         DBW32(zf, 0); DBW32(zf, e.offset);
         fwrite(e.name, 1, e.nameLen, zf);
@@ -162,6 +186,24 @@ static BOOL DBCreateZip(NSString *srcDir, NSString *dstZip) {
     fclose(zf);
     DBLog(@"ZIP created: %lu files", (unsigned long)entries.count);
     return YES;
+}
+
+static NSData *DBInflateData(const void *compData, size_t compSize, size_t uncompSize) {
+    if (uncompSize == 0) return [NSData data];
+    NSMutableData *out = [NSMutableData dataWithLength:uncompSize];
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    strm.next_in = (Bytef *)compData;
+    strm.avail_in = (uInt)compSize;
+    strm.next_out = (Bytef *)out.mutableBytes;
+    strm.avail_out = (uInt)uncompSize;
+    // -15 = raw deflate (no zlib/gzip header)
+    if (inflateInit2(&strm, -15) != Z_OK) return nil;
+    int ret = inflate(&strm, Z_FINISH);
+    inflateEnd(&strm);
+    if (ret != Z_STREAM_END && ret != Z_OK) return nil;
+    out.length = strm.total_out;
+    return out;
 }
 
 static BOOL DBExtractZip(NSString *zipPath, NSString *dstDir) {
@@ -189,9 +231,14 @@ static BOOL DBExtractZip(NSString *zipPath, NSString *dstDir) {
     for (int i = 0; i < tot; i++) {
         uint32_t sig; fread(&sig, 4, 1, zf);
         if (sig != 0x02014b50) break;
-        fseek(zf, 16, SEEK_CUR);
+        fseek(zf, 4, SEEK_CUR); // skip version made by + version needed
+        // Read compression method from central directory
+        uint16_t cdFlags, cdComp;
+        fread(&cdFlags, 2, 1, zf);
+        fread(&cdComp, 2, 1, zf);
+        fseek(zf, 8, SEEK_CUR); // skip mod time/date + crc
         uint32_t csz; fread(&csz, 4, 1, zf);
-        fseek(zf, 4, SEEK_CUR);
+        uint32_t usz; fread(&usz, 4, 1, zf);
         uint16_t nl, el, cl;
         fread(&nl, 2, 1, zf); fread(&el, 2, 1, zf); fread(&cl, 2, 1, zf);
         fseek(zf, 8, SEEK_CUR);
@@ -199,17 +246,47 @@ static BOOL DBExtractZip(NSString *zipPath, NSString *dstDir) {
         char nm[1024] = {0}; fread(nm, 1, nl, zf);
         fseek(zf, el+cl, SEEK_CUR);
         long sv = ftell(zf);
+
+        // Read local header to get actual compression info
+        fseek(zf, lho+4, SEEK_SET);
+        uint16_t lhFlags, lhComp;
+        fread(&lhFlags, 2, 1, zf);
+        fread(&lhComp, 2, 1, zf);
+        fseek(zf, 12, SEEK_CUR); // skip crc + sizes + nameLen offset
+        // Re-read from lho+26 for name/extra lengths
         fseek(zf, lho+26, SEEK_SET);
         uint16_t lnl, lel; fread(&lnl, 2, 1, zf); fread(&lel, 2, 1, zf);
         fseek(zf, lnl+lel, SEEK_CUR);
-        if (csz > 0) {
-            uint8_t *dd = (uint8_t *)malloc(csz);
-            fread(dd, 1, csz, zf);
+
+        // Use central directory values (more reliable than local header when data descriptor is used)
+        uint16_t compMethod = cdComp;
+
+        if (csz > 0 || usz > 0) {
             NSString *op = [dstDir stringByAppendingPathComponent:[NSString stringWithUTF8String:nm]];
             [fm createDirectoryAtPath:[op stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
-            FILE *of = fopen([op UTF8String], "wb");
-            if (of) { fwrite(dd, 1, csz, of); fclose(of); }
-            free(dd);
+
+            if (compMethod == 0) {
+                // Store: read directly
+                uint8_t *dd = (uint8_t *)malloc(csz > 0 ? csz : usz);
+                size_t readSize = csz > 0 ? csz : usz;
+                fread(dd, 1, readSize, zf);
+                FILE *of = fopen([op UTF8String], "wb");
+                if (of) { fwrite(dd, 1, readSize, of); fclose(of); }
+                free(dd);
+            } else if (compMethod == 8) {
+                // Deflate: read compressed data and inflate
+                uint8_t *cd2 = (uint8_t *)malloc(csz);
+                fread(cd2, 1, csz, zf);
+                NSData *inflated = DBInflateData(cd2, csz, usz);
+                free(cd2);
+                if (inflated) {
+                    [inflated writeToFile:op atomically:YES];
+                } else {
+                    DBLog(@"Inflate failed for: %s", nm);
+                }
+            } else {
+                DBLog(@"Unsupported compression %d for: %s", compMethod, nm);
+            }
         }
         fseek(zf, sv, SEEK_SET);
     }
@@ -471,3 +548,6 @@ NSArray *DBInjectSettingsSections(NSArray *orig) {
     [r insertObject:section atIndex:0];
     return [r copy];
 }
+
+
+
