@@ -1,8 +1,8 @@
 Package: com.douyin.bypass
 Name: DouyinBypass
-Depends: mobilesubstrate
-Version: 1.0.0
+Depends: mobilesubstrate, zip
+Version: 2.1.0
 Architecture: iphoneos-arm
-Description: Bypass Douyin/Douyin Lite version check and resign detection for iOS 27 self-signed IPA
+Description: Bypass Douyin version check + Account backup/restore with native settings UI and document picker export/import.
 Author: LocalDev
 Section: Tweaks

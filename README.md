@@ -1,110 +1,63 @@
-# DouyinBypass
+# DouyinBypass v2.0.0
 
-iOS Tweak to bypass Douyin / Douyin Lite version check and resign detection.
-Supports **2 build targets** for different injection methods.
+iOS 抖音插件：绕过版本检测 + 账号备份/恢复
 
-## Build Artifacts
+## 功能
 
-| Artifact | Format | Use Case | Injection Method |
-|----------|--------|----------|-----------------|
-| DEB | .deb | Jailbroken devices | Substrate / Substitute / ElleKit auto-inject |
-| Dylib | .dylib | Self-signed IPA | TrollStore / Dopamine / inject.sh script |
+### 1. 绕过检测（v1.0 原有）
+- mobileprovision 签名验证绕过
+- 强制升级弹窗拦截
+- App Store 渠道伪装
+- 证书校验跳过
 
-## GitHub Actions Auto-Build
+### 2. 账号管理（v2.0 新增）
+- **一键导出**：提取当前登录账号的完整信息（UserDefaults、Keychain、Cookies），打包为 ZIP 保存到 `/var/mobile/Documents/DouyinAccountBackup/`
+- **一键导入**：从 ZIP 备份恢复账号登录状态，重启抖音即可生效
+- **备份管理**：查看已保存的备份列表、清除所有备份
+- **设置页注入**：在抖音设置页面底部添加「🔐 账号管理」按钮，点击进入管理界面
 
-Push to GitHub and all 2 artifacts are built automatically.
-Download from **Actions -> Artifacts**:
-- DouyinBypass-deb - for jailbreak
-- DouyinBypass-dylib - for IPA injection
+### 导出的数据包含
+| 类别 | 内容 |
+|------|------|
+| UserDefaults | session_key, uid, device_id, token, login_type 等 |
+| Keychain | douyin/aweme/bytedance 相关的密钥条目 |
+| Cookies | douyin.com, snssdk.com, bytedance.com 等域名 |
+| Metadata | 导出时间、App 版本、设备型号 |
 
-Create a tag to auto-publish a Release with all artifacts:
+## 安装
+
+### 越狱设备（DEB）
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+make package FINALPACKAGE=1
+# 将 packages/*.deb 传输到手机并安装
 ```
 
-## Local Build (macOS + Theos)
-
+### IPA 注入（Dylib）
 ```bash
-# Setup
-export THEOS=$HOME/theos
-git clone --recursive https://github.com/theos/theos.git $THEOS
-brew install ldid insert_dylib
-
-# Build all 2 artifacts
-make package-all FINALPACKAGE=1
-
-# Or build individually:
-make package FINALPACKAGE=1          # DEB only
-make package-dylib                    # Dylib only
+make package-all
+# 使用 inject.sh 或手动将 packages/DouyinBypass.dylib 注入 IPA
 ```
 
-## Usage
+## 依赖
+- mobilesubstrate
+- zip（系统自带 `/usr/bin/zip` 和 `/usr/bin/unzip`）
 
-### 1. Jailbreak (DEB)
+## 使用说明
+1. 安装插件后打开抖音
+2. 进入「我」→「设置」
+3. 点击底部的红色「🔐 账号管理」按钮
+4. 选择「导出当前账号信息」或「导入账号信息」
+5. 导入成功后重启抖音即可切换账号
+
+## 备份文件位置
 ```
-dpkg -i com.douyin.bypass_1.0.0_iphoneos-arm.deb
-killall -9 Aweme
-```
-
-### 2. Self-signed IPA (Dylib injection)
-
-**Option A: Using inject.sh (recommended)**
-```bash
-chmod +x inject.sh
-./inject.sh douyin.ipa                          # ad-hoc sign
-./inject.sh douyin.ipa patched.ipa              # custom output
-./inject.sh douyin.ipa out.ipa 'iPhone Developer'  # with identity
+/var/mobile/Documents/DouyinAccountBackup/douyin_account_<timestamp>.zip
 ```
 
-**Option B: Manual injection**
-1. Unzip IPA, copy DouyinBypass.dylib to Payload/Aweme.app/Frameworks/
-2. Add load command: insert_dylib @executable_path/Frameworks/DouyinBypass.dylib Payload/Aweme.app/Aweme
-3. Re-sign: codesign -fs - Payload/Aweme.app
-4. Repackage: zip -qr patched.ipa Payload/
-5. Install with AltStore / Sideloadly / TrollStore
+可通过 Filza / SFTP / iFile 等工具访问和管理备份文件。
 
-**Option C: Using TrollStore / Dopamine**
-- Use your tool's built-in deb/dylib injection feature
-- Point it to the .deb or .dylib file
-
-
-## Hooks
-
-| Class | Method | Action |
-|-------|--------|--------|
-| BDUGCloudkitManager | isValidMobileProvision | return YES |
-| BDUGCloudkitManager | setupCloudKit | skip |
-| AWEAccountForceUpgradeManager | checkForceUpgrade | skip |
-| AWEAccountForceUpgradeManager | showForceUpgradeDialog | block |
-| AWEAccountForceUpgradeManager | shouldForceUpgrade | return NO |
-| NSObject | isAppStoreChannel | return YES |
-| AWEAppStoreMediator | openURL:completion: | bypass cert |
-| AWEAppStoreMediator | initSKStoreProductVCWithCompletion: | bypass cert |
-| TTAccountSDKSetup | startWithConfig: | proceed |
-
-## Supported Apps
-- com.ss.iphone.ugc.Aweme (Douyin)
-- com.ss.iphone.ugc.aweme.lite (Douyin Lite)
-
-## Target Info
-- Version: 40.4.0
-- Minimum iOS: 18.0
-- Architectures: arm64, arm64e
-
-## File Structure
-```
-DouyinBypass/
-  .github/workflows/build.yml   # GitHub Actions CI (2 artifacts)
-  Tweak.xm                      # Core hook code (Logos)
-  Makefile                      # 2 build targets
-  control                       # DEB metadata
-  DouyinBypass.plist            # Substrate filter
-  build.sh                      # Local build script
-  inject.sh                     # IPA injection script
-  .gitignore
-  README.md
-```
-
-## Disclaimer
-For educational and personal use only.
+## 注意事项
+- 导入账号后需要**重启抖音**才能生效
+- 不同设备的 device_id 可能影响部分风控策略
+- 备份文件包含敏感凭据，请妥善保管
+- 仅适用于已越狱设备或自签 IPA 环境
