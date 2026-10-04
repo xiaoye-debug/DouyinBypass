@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <substrate.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "DBHelpers.h"
 
 // DouyinBypass v2.1.0
@@ -9,13 +10,41 @@
 //        com.ss.iphone.ugc.aweme.lite (Douyin Lite)
 
 // ============================================================
-#pragma mark - Bypass Hooks
+#pragma mark - Class Declarations (must be full @interface, not just @class)
 // ============================================================
 
 @interface BDUGCloudkitManager : NSObject
 - (BOOL)isValidMobileProvision;
 - (void)setupCloudKit;
 @end
+
+@interface AWEAccountForceUpgradeManager : NSObject
++ (instancetype)sharedInstance;
+- (void)checkForceUpgrade;
+- (void)showForceUpgradeDialog;
+- (BOOL)shouldForceUpgrade;
+@end
+
+@interface AWEAppStoreMediator : NSObject
++ (instancetype)sharedInstance;
+- (void)openURL:(NSURL *)url completion:(void(^)(BOOL))completion;
+- (void)initSKStoreProductVCWithCompletion:(void(^)(id))completion;
+@end
+
+@interface TTAccountSDKSetup : NSObject
++ (void)startWithConfig:(id)config;
+@end
+
+// Full interface declaration so compiler knows about %new methods
+@interface AWESettingsViewController : UIViewController <UITableViewDataSource, UITableViewDelegate, UIDocumentPickerDelegate>
+- (UITableViewCell *)db_cellForInjectedRow:(UITableView *)tv indexPath:(NSIndexPath *)ip;
+- (void)db_handleInjectedSelection:(NSInteger)row fromVC:(UIViewController *)vc tableView:(UITableView *)tv;
+- (void)db_showBackupListFromVC:(UIViewController *)vc;
+@end
+
+// ============================================================
+#pragma mark - Bypass Hooks
+// ============================================================
 
 %hook BDUGCloudkitManager
 - (BOOL)isValidMobileProvision {
@@ -24,13 +53,6 @@
 - (void)setupCloudKit {
 }
 %end
-
-@interface AWEAccountForceUpgradeManager : NSObject
-+ (instancetype)sharedInstance;
-- (void)checkForceUpgrade;
-- (void)showForceUpgradeDialog;
-- (BOOL)shouldForceUpgrade;
-@end
 
 %hook AWEAccountForceUpgradeManager
 - (void)checkForceUpgrade {
@@ -42,12 +64,6 @@
 }
 %end
 
-@interface AWEAppStoreMediator : NSObject
-+ (instancetype)sharedInstance;
-- (void)openURL:(NSURL *)url completion:(void(^)(BOOL))completion;
-- (void)initSKStoreProductVCWithCompletion:(void(^)(id))completion;
-@end
-
 %hook AWEAppStoreMediator
 - (void)openURL:(NSURL *)url completion:(void(^)(BOOL))completion {
     if (completion) completion(YES);
@@ -56,10 +72,6 @@
     if (completion) completion(nil);
 }
 %end
-
-@interface TTAccountSDKSetup : NSObject
-+ (void)startWithConfig:(id)config;
-@end
 
 %hook TTAccountSDKSetup
 + (void)startWithConfig:(id)config {
@@ -182,8 +194,9 @@
         });
     }
     else if (row == 1) {
-        NSArray *types = @[@"com.pkware.zip-archive", @"public.zip-archive", @"public.data"];
-        UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:types inMode:UIDocumentPickerModeImport];
+        // iOS 14+ API: use UTType-based initializer
+        NSArray<UTType *> *types = @[[UTType typeWithIdentifier:@"com.pkware.zip-archive"] ?: UTTypeData, UTTypeData];
+        UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:YES];
         picker.delegate = (id<UIDocumentPickerDelegate>)vc;
         picker.modalPresentationStyle = UIModalPresentationFormSheet;
         picker.allowsMultipleSelection = NO;

@@ -8,7 +8,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = DouyinBypass
 DouyinBypass_FILES = Tweak.xm DBHelpers.m
 DouyinBypass_CFLAGS = -fobjc-arc
-DouyinBypass_FRAMEWORKS = Foundation UIKit Security
+DouyinBypass_FRAMEWORKS = Foundation UIKit Security UniformTypeIdentifiers
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
@@ -27,7 +27,7 @@ $(DYLIB_DIR)/DouyinBypass.dylib: $(DYLIB_DIR)/Tweak.xm.mm DBHelpers.m
 		-isysroot "$(THEOS_SDK_PATH)" \
 		-I"$(THEOS_INCLUDE_PATH)" \
 		-F"$(THEOS_VENDOR_LIB_PATH)" \
-		-framework Foundation -framework UIKit -framework Security \
+		-framework Foundation -framework UIKit -framework Security -framework UniformTypeIdentifiers \
 		-lobjc -lsubstrate \
 		-o $@ $^
 
