@@ -9,86 +9,42 @@
 // DouyinBypass v2.1.0
 // Target: com.ss.iphone.ugc.Aweme (Douyin)
 //        com.ss.iphone.ugc.aweme.lite (Douyin Lite)
-// Features:
-//   1. Bypass version check / resign detection
-//   2. Account backup & restore (ZIP export/import via document picker)
-//   3. Native-style settings section injection (like Aweme Pro)
 
 #define LOG_TAG @"[DouyinBypass]"
 #define DBLog(fmt, ...) NSLog(@"%@ " fmt, LOG_TAG, ##__VA_ARGS__)
 
 #define BACKUP_DIR @"/var/mobile/Documents/DouyinAccountBackup"
 #define BACKUP_FILENAME_FMT @"douyin_account_%@.zip"
-
-// Injected section index (always section 0, pushing original sections down by 1)
 #define DB_INJECTED_SECTION 0
-#define DB_SECTION_ROW_COUNT 3  // Export, Import, Backup List
+#define DB_SECTION_ROW_COUNT 3
 
 // ============================================================
-#pragma mark - Part 1: Original Bypass Hooks
+#pragma mark - Forward Declarations & C Helpers (BEFORE any %hook)
 // ============================================================
 
-@interface BDUGCloudkitManager : NSObject
-- (BOOL)isValidMobileProvision;
-- (void)setupCloudKit;
-@end
+typedef struct {
+    const char *icon;
+    const char *title;
+    const char *detail;
+} DBMenuItem;
 
-%hook BDUGCloudkitManager
-- (BOOL)isValidMobileProvision { return YES; }
-- (void)setupCloudKit {}
-%end
+static DBMenuItem gDBMenuItems[] = {
+    {"♡", "导出账号信息", "保存"},
+    {"☆", "导入账号信息", "选择"},
+    {"☁", "查看备份列表", "管理"},
+};
 
-@interface AWEAccountForceUpgradeManager : NSObject
-+ (instancetype)sharedInstance;
-- (void)checkForceUpgrade;
-- (void)showForceUpgradeDialog;
-- (BOOL)shouldForceUpgrade;
-@end
-
-%hook AWEAccountForceUpgradeManager
-- (void)checkForceUpgrade {}
-- (void)showForceUpgradeDialog {}
-- (BOOL)shouldForceUpgrade { return NO; }
-%end
-
-%hook NSObject
-- (BOOL)isAppStoreChannel {
-    if ([self respondsToSelector:@selector(isAppStoreChannel)]) return YES;
-    return %orig;
+static NSInteger DBRealSection(NSInteger displaySection) {
+    return displaySection - 1;
 }
-%end
-
-@interface AWEAppStoreMediator : NSObject
-+ (instancetype)sharedInstance;
-- (void)openURL:(NSURL *)url completion:(void(^)(BOOL))completion;
-- (void)initSKStoreProductVCWithCompletion:(void(^)(id))completion;
-@end
-
-%hook AWEAppStoreMediator
-- (void)openURL:(NSURL *)url completion:(void(^)(BOOL))completion {
-    if (completion) completion(YES);
-}
-- (void)initSKStoreProductVCWithCompletion:(void(^)(id))completion {
-    if (completion) completion(nil);
-}
-%end
-
-@interface TTAccountSDKSetup : NSObject
-+ (void)startWithConfig:(id)config;
-@end
-
-%hook TTAccountSDKSetup
-+ (void)startWithConfig:(id)config { %orig; }
-%end
 
 // ============================================================
-#pragma mark - Part 2: Account Data Extraction
+#pragma mark - Account Data Extraction
 // ============================================================
 
 static NSDictionary *DBExtractAccountData(void) {
     NSMutableDictionary *data = [NSMutableDictionary dictionary];
 
-    // 1. UserDefaults
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSArray *accountKeys = @[
         @"session_key", @"session_secret", @"uid", @"user_id",
@@ -118,7 +74,6 @@ static NSDictionary *DBExtractAccountData(void) {
     }
     data[@"userDefaults"] = udData;
 
-    // 2. Keychain
     NSMutableArray *keychainItems = [NSMutableArray array];
     NSArray *secClasses = @[(__bridge id)kSecClassGenericPassword,
                             (__bridge id)kSecClassInternetPassword];
@@ -157,7 +112,6 @@ static NSDictionary *DBExtractAccountData(void) {
     }
     data[@"keychain"] = keychainItems;
 
-    // 3. Cookies
     NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     NSMutableArray *cookies = [NSMutableArray array];
     for (NSHTTPCookie *cookie in storage.cookies) {
@@ -176,7 +130,6 @@ static NSDictionary *DBExtractAccountData(void) {
     }
     data[@"cookies"] = cookies;
 
-    // 4. Metadata
     data[@"metadata"] = @{
         @"exportTime": @([[NSDate date] timeIntervalSince1970]),
         @"appVersion": [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"unknown",
@@ -191,7 +144,7 @@ static NSDictionary *DBExtractAccountData(void) {
 }
 
 // ============================================================
-#pragma mark - Part 3: ZIP Helpers
+#pragma mark - ZIP Helpers
 // ============================================================
 
 static BOOL DBCreateZipFromDirectory(NSString *srcDir, NSString *dstZip) {
@@ -215,7 +168,7 @@ static BOOL DBUnzipToDirectory(NSString *srcZip, NSString *dstDir) {
 }
 
 // ============================================================
-#pragma mark - Part 4: Export & Import Logic
+#pragma mark - Export & Import
 // ============================================================
 
 static NSString *DBPrepareExportZip(void) {
@@ -258,13 +211,11 @@ static BOOL DBImportAccountFromPath(NSString *zipPath) {
     NSDictionary *accountData = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&err];
     if (!accountData) return NO;
 
-    // Restore UserDefaults
     NSDictionary *udData = accountData[@"userDefaults"];
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     for (NSString *key in udData) [defaults setObject:udData[key] forKey:key];
     [defaults synchronize];
 
-    // Restore Keychain
     NSArray *kcItems = accountData[@"keychain"];
     for (NSDictionary *item in kcItems) {
         NSString *svc = item[@"service"];
@@ -280,7 +231,6 @@ static BOOL DBImportAccountFromPath(NSString *zipPath) {
         SecItemAdd((__bridge CFDictionaryRef)addQ, NULL);
     }
 
-    // Restore Cookies
     NSArray *cookieData = accountData[@"cookies"];
     NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     for (NSDictionary *cd in cookieData) {
@@ -302,45 +252,85 @@ static BOOL DBImportAccountFromPath(NSString *zipPath) {
 }
 
 // ============================================================
-#pragma mark - Part 5: Settings Section Injection (Native Style)
+#pragma mark - Bypass Hooks (specific classes only, NO NSObject)
 // ============================================================
-// We inject a new section at index 0 that looks exactly like
-// the "Aweme Pro" section in the screenshot:
-//   Header: "♪ DouyinBypass"
-//   Row 0:  icon + "导出账号"    right: "保存"  >
-//   Row 1:  icon + "导入账号"    right: "选择"  >
-//   Row 2:  icon + "备份列表"    right: count  >
 
-// Menu item definitions for our injected section
-typedef struct {
-    const char *icon;
-    const char *title;
-    const char *detail;
-} DBMenuItem;
+@interface BDUGCloudkitManager : NSObject
+- (BOOL)isValidMobileProvision;
+- (void)setupCloudKit;
+@end
 
-static DBMenuItem gDBMenuItems[] = {
-    {"♡", "导出账号信息", "保存"},
-    {"☆", "导入账号信息", "选择"},
-    {"☁", "查看备份列表", "管理"},
-};
+%hook BDUGCloudkitManager
+- (BOOL)isValidMobileProvision { return YES; }
+- (void)setupCloudKit {}
+%end
 
-// Forward declaration for the settings VC hook
-static NSInteger db_originalSectionCount(id self, SEL _cmd, UITableView *tv);
-static NSInteger db_originalRowCount(id self, SEL _cmd, UITableView *tv, NSInteger section);
+@interface AWEAccountForceUpgradeManager : NSObject
++ (instancetype)sharedInstance;
+- (void)checkForceUpgrade;
+- (void)showForceUpgradeDialog;
+- (BOOL)shouldForceUpgrade;
+@end
 
-// We store original IMPs
-static NSInteger (*orig_numberOfSections)(id, SEL, UITableView *);
-static NSInteger (*orig_numberOfRows)(id, SEL, UITableView *, NSInteger);
-static UITableViewCell *(*orig_cellForRow)(id, SEL, UITableView *, NSIndexPath *);
-static NSString *(*orig_headerTitle)(id, SEL, UITableView *, NSInteger);
-static void (*orig_didSelectRow)(id, SEL, UITableView *, NSIndexPath *);
-static CGFloat (*orig_heightForHeader)(id, SEL, UITableView *, NSInteger);
-static UIView *(*orig_viewForHeader)(id, SEL, UITableView *, NSInteger);
+%hook AWEAccountForceUpgradeManager
+- (void)checkForceUpgrade {}
+- (void)showForceUpgradeDialog {}
+- (BOOL)shouldForceUpgrade { return NO; }
+%end
 
-// Helper: get the real (original) section from the displayed section
-static NSInteger DBRealSection(NSInteger displaySection) {
-    return displaySection - 1; // our section is 0, originals shift by +1
+@interface AWEAppStoreMediator : NSObject
++ (instancetype)sharedInstance;
+- (void)openURL:(NSURL *)url completion:(void(^)(BOOL))completion;
+- (void)initSKStoreProductVCWithCompletion:(void(^)(id))completion;
+@end
+
+%hook AWEAppStoreMediator
+- (void)openURL:(NSURL *)url completion:(void(^)(BOOL))completion {
+    if (completion) completion(YES);
 }
+- (void)initSKStoreProductVCWithCompletion:(void(^)(id))completion {
+    if (completion) completion(nil);
+}
+%end
+
+@interface TTAccountSDKSetup : NSObject
++ (void)startWithConfig:(id)config;
+@end
+
+%hook TTAccountSDKSetup
++ (void)startWithConfig:(id)config { %orig; }
+%end
+
+// isAppStoreChannel: use MSHookMessageEx instead of %hook NSObject
+static BOOL _db_isAppStoreChannel(id self, SEL _cmd) {
+    return YES;
+}
+
+static void DBHookIsAppStoreChannel(void) {
+    // Hook on common Douyin classes that implement isAppStoreChannel
+    NSArray *classNames = @[
+        @"AWEAppEnvironment", @"AWESecUserModel", @"AWEConfigManager",
+        @"BDUGCloudkitManager", @"AWEAppStoreMediator", @"TTAccountSDKSetup"
+    ];
+    for (NSString *clsName in classNames) {
+        Class cls = NSClassFromString(clsName);
+        if (cls && [cls instancesRespondToSelector:@selector(isAppStoreChannel)]) {
+            MSHookMessageEx(cls, @selector(isAppStoreChannel),
+                           (IMP)_db_isAppStoreChannel, NULL);
+            DBLog(@"Hooked isAppStoreChannel on %@", clsName);
+        }
+        // Also check class method
+        if (cls && [cls respondsToSelector:@selector(isAppStoreChannel)]) {
+            MSHookMessageEx(object_getClass(cls), @selector(isAppStoreChannel),
+                           (IMP)_db_isAppStoreChannel, NULL);
+            DBLog(@"Hooked +isAppStoreChannel on %@", clsName);
+        }
+    }
+}
+
+// ============================================================
+#pragma mark - Settings Section Injection (Native Style)
+// ============================================================
 
 %hook AWESettingsViewController
 
@@ -351,20 +341,13 @@ static NSInteger DBRealSection(NSInteger displaySection) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     NSInteger orig = %orig;
-    return orig + 1; // add our section at top
+    return orig + 1;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     if (section == DB_INJECTED_SECTION) {
         return DB_SECTION_ROW_COUNT;
     }
-    // For all other sections, delegate to original with shifted index
-    // But since Logos %orig calls the original method, and the original
-    // doesn't know about our extra section, we need to pass the real section.
-    // The trick: the original method receives whatever section the table view asks for.
-    // Since we added 1 section at top, sections 1..N map to original 0..N-1.
-    // But %orig will receive the same section number the table view passes.
-    // We need to temporarily adjust. Use a thread-local flag.
     return %orig(tv, DBRealSection(section));
 }
 
@@ -378,21 +361,20 @@ static NSInteger DBRealSection(NSInteger displaySection) {
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     if (section == DB_INJECTED_SECTION) {
-        return @"♪ DouyinBypass";
+        return @"\u266A DouyinBypass";
     }
     return %orig(tv, DBRealSection(section));
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)section {
     if (section == DB_INJECTED_SECTION) {
-        return %orig(tv, 0); // use same height as original first section header
+        return UITableViewAutomaticDimension;
     }
     return %orig(tv, DBRealSection(section));
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
     if (section == DB_INJECTED_SECTION) {
-        // Return nil to use default grouped style header (titleForHeaderInSection)
         return nil;
     }
     return %orig(tv, DBRealSection(section));
@@ -408,8 +390,6 @@ static NSInteger DBRealSection(NSInteger displaySection) {
     %orig(tv, realIP);
 }
 
-// === New methods for injected section ===
-
 %new
 - (UITableViewCell *)db_cellForInjectedRow:(UITableView *)tv indexPath:(NSIndexPath *)ip {
     static NSString *reuseId = @"DBInjectedCell";
@@ -423,7 +403,6 @@ static NSInteger DBRealSection(NSInteger displaySection) {
     cell.textLabel.font = [UIFont systemFontOfSize:16];
     cell.textLabel.textColor = [UIColor labelColor];
 
-    // Dynamic detail for backup list row
     if (ip.row == 2) {
         NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:BACKUP_DIR error:nil];
         NSInteger zipCount = 0;
@@ -436,8 +415,6 @@ static NSInteger DBRealSection(NSInteger displaySection) {
     cell.detailTextLabel.font = [UIFont systemFontOfSize:15];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-
-    // Match Douyin's background
     cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
     cell.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
 
@@ -447,7 +424,6 @@ static NSInteger DBRealSection(NSInteger displaySection) {
 %new
 - (void)db_handleInjectedSelection:(NSInteger)row fromVC:(UIViewController *)vc tableView:(UITableView *)tv {
     if (row == 0) {
-        // Export: prepare ZIP then let user pick save location
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             NSString *zipPath = DBPrepareExportZip();
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -461,14 +437,12 @@ static NSInteger DBRealSection(NSInteger displaySection) {
                 UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[fileURL]];
                 picker.delegate = (id<UIDocumentPickerDelegate>)vc;
                 picker.modalPresentationStyle = UIModalPresentationFormSheet;
-                // Store zip path for later cleanup
                 objc_setAssociatedObject(vc, "db_export_zip_path", zipPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 [vc presentViewController:picker animated:YES completion:nil];
             });
         });
     }
     else if (row == 1) {
-        // Import: let user pick a ZIP file from anywhere
         NSArray *types = @[@"com.pkware.zip-archive", @"public.zip-archive", @"public.data"];
         UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:types inMode:UIDocumentPickerModeImport];
         picker.delegate = (id<UIDocumentPickerDelegate>)vc;
@@ -477,7 +451,6 @@ static NSInteger DBRealSection(NSInteger displaySection) {
         [vc presentViewController:picker animated:YES completion:nil];
     }
     else if (row == 2) {
-        // Show backup list
         [self db_showBackupListFromVC:vc];
     }
 }
@@ -499,17 +472,14 @@ static NSInteger DBRealSection(NSInteger displaySection) {
         }
     }
     [info sortUsingSelector:@selector(compare:)];
-    [info reverseObjectEnumerator];
 
-    NSString *msg = info.count > 0 ? [info componentsJoinedByString:@"\n\n"] : @"暂无备份文件\n\n请先导出账号信息";
+    NSString *msg = info.count > 0 ? [[info reverseObjectEnumerator].allObjects componentsJoinedByString:@"\n\n"] : @"暂无备份文件\n\n请先导出账号信息";
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"备份列表" message:msg preferredStyle:UIAlertControllerStyleAlert];
 
     if (info.count > 0) {
         [alert addAction:[UIAlertAction actionWithTitle:@"清除所有备份" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-            NSError *err = nil;
-            [fm removeItemAtPath:BACKUP_DIR error:&err];
+            [fm removeItemAtPath:BACKUP_DIR error:nil];
             [fm createDirectoryAtPath:BACKUP_DIR withIntermediateDirectories:YES attributes:nil error:nil];
-            [tv reloadData];
         }]];
     }
     [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
@@ -519,18 +489,15 @@ static NSInteger DBRealSection(NSInteger displaySection) {
 %end
 
 // ============================================================
-#pragma mark - Part 6: UIDocumentPickerDelegate on Settings VC
+#pragma mark - UIDocumentPickerDelegate
 // ============================================================
 
 %hook AWESettingsViewController
 
-// Handle export completion (file saved to user-chosen location)
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    // Check if this is an export (we stored the zip path)
     NSString *exportZip = objc_getAssociatedObject(self, "db_export_zip_path");
     if (exportZip) {
         objc_setAssociatedObject(self, "db_export_zip_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        // File was already copied by the system to user's chosen location
         UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导出成功"
             message:[NSString stringWithFormat:@"已保存到:\n%@", urls.firstObject.path]
             preferredStyle:UIAlertControllerStyleAlert];
@@ -539,15 +506,12 @@ static NSInteger DBRealSection(NSInteger displaySection) {
         return;
     }
 
-    // This is an import
     NSURL *pickedURL = urls.firstObject;
     if (!pickedURL) return;
 
-    // Security-scoped resource access
     BOOL scoped = [pickedURL startAccessingSecurityScopedResource];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        // Copy to local temp first (security-scoped URLs can be tricky)
         NSString *tempPath = [BACKUP_DIR stringByAppendingPathComponent:@"import_picked.zip"];
         [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
         NSError *copyErr = nil;
@@ -589,7 +553,6 @@ static NSInteger DBRealSection(NSInteger displaySection) {
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
-    // Cleanup export temp if cancelled
     NSString *exportZip = objc_getAssociatedObject(self, "db_export_zip_path");
     if (exportZip) {
         objc_setAssociatedObject(self, "db_export_zip_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -609,4 +572,5 @@ static NSInteger DBRealSection(NSInteger displaySection) {
                               withIntermediateDirectories:YES
                                                attributes:nil
                                                     error:nil];
+    DBHookIsAppStoreChannel();
 }
