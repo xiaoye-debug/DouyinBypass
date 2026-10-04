@@ -2,7 +2,8 @@
 #import <Security/Security.h>
 #import <objc/runtime.h>
 #import <substrate.h>
-#include <stdlib.h>
+#include <spawn.h>
+#include <sys/wait.h>
 
 DBMenuItem gDBMenuItems[] = {
     {"\xe2\x99\xa1", "\xe5\xaf\xbc\xe5\x87\xba\xe8\xb4\xa6\xe5\x8f\xb7\xe4\xbf\xa1\xe6\x81\xaf", "\xe4\xbf\x9d\xe5\xad\x98"},
@@ -115,16 +116,26 @@ NSDictionary *DBExtractAccountData(void) {
     return [data copy];
 }
 
+extern char **environ;
+
+static int DBSpawnAndWait(const char *path, char *const argv[]) {
+    pid_t pid;
+    int status = posix_spawn(&pid, path, NULL, NULL, argv, environ);
+    if (status != 0) return -1;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 static BOOL DBCreateZipFromDirectory(NSString *srcDir, NSString *dstZip) {
-    NSString *cmd = [NSString stringWithFormat:@"/usr/bin/zip -r -j '%@' '%@'", dstZip, srcDir];
-    int ret = system([cmd UTF8String]);
+    const char *argv[] = {"/usr/bin/zip", "-r", "-j", [dstZip UTF8String], [srcDir UTF8String], NULL};
+    int ret = DBSpawnAndWait("/usr/bin/zip", (char *const *)argv);
     return ret == 0 && [[NSFileManager defaultManager] fileExistsAtPath:dstZip];
 }
 
 static BOOL DBUnzipToDirectory(NSString *srcZip, NSString *dstDir) {
     [[NSFileManager defaultManager] createDirectoryAtPath:dstDir withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *cmd = [NSString stringWithFormat:@"/usr/bin/unzip -o '%@' -d '%@'", srcZip, dstDir];
-    int ret = system([cmd UTF8String]);
+    const char *argv[] = {"/usr/bin/unzip", "-o", [srcZip UTF8String], "-d", [dstDir UTF8String], NULL};
+    int ret = DBSpawnAndWait("/usr/bin/unzip", (char *const *)argv);
     return ret == 0;
 }
 
@@ -251,3 +262,4 @@ void DBHookAppStoreMediator(void) {
     MSHookMessageEx(cls, @selector(initSKStoreProductVCWithCompletion:), (IMP)_db_initSKStore, NULL);
     DBLog(@"Hooked AWEAppStoreMediator openURL + initSKStore");
 }
+
