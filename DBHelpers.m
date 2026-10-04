@@ -91,9 +91,10 @@ NSDictionary *DBExtractAccountData(void) {
                                     [lowerSvc containsString:@"tiktok"] || [lowerSvc containsString:@"ss_"];
                     if (relevant && d.length > 0) {
                         [keychainItems addObject:@{
-                            @"service": svc, @"account": acct,
-                            @"data_base64": [d base64EncodedStringWithOptions:0],
-                            @"class": secClass
+                            @"service": svc ?: @"",
+                            @"account": acct ?: @"",
+                            @"data_base64": [d base64EncodedStringWithOptions:0] ?: @"",
+                            @"class": [secClass isKindOfClass:[NSString class]] ? secClass : ([secClass description] ?: @"")
                         }];
                     }
                 }
@@ -162,6 +163,48 @@ NSString *DBPrepareExportJson(void) {
         NSString *filePath = [cacheDir stringByAppendingPathComponent:fileName];
 
         NSDictionary *accountData = DBExtractAccountData();
+
+        // Validate JSON serializability and sanitize if needed
+        if (![NSJSONSerialization isValidJSONObject:accountData]) {
+            DBLog(@"Data not directly JSON-serializable, sanitizing...");
+            NSMutableDictionary *clean = [NSMutableDictionary dictionary];
+            for (NSString *key in accountData) {
+                id val = accountData[key];
+                if ([NSJSONSerialization isValidJSONObject:val]) {
+                    clean[key] = val;
+                } else if ([val isKindOfClass:[NSDictionary class]]) {
+                    NSMutableDictionary *cleanSub = [NSMutableDictionary dictionary];
+                    for (NSString *subKey in val) {
+                        id subVal = val[subKey];
+                        if ([NSJSONSerialization isValidJSONObject:subVal]) {
+                            cleanSub[subKey] = subVal;
+                        } else {
+                            cleanSub[subKey] = [subVal description] ?: @"";
+                        }
+                    }
+                    clean[key] = cleanSub;
+                } else if ([val isKindOfClass:[NSArray class]]) {
+                    NSMutableArray *cleanArr = [NSMutableArray array];
+                    for (id item in val) {
+                        if ([NSJSONSerialization isValidJSONObject:item]) {
+                            [cleanArr addObject:item];
+                        } else if ([item isKindOfClass:[NSDictionary class]]) {
+                            NSMutableDictionary *cleanItem = [NSMutableDictionary dictionary];
+                            for (NSString *ik in item) {
+                                id iv = item[ik];
+                                cleanItem[ik] = [NSJSONSerialization isValidJSONObject:iv] ? iv : ([iv description] ?: @"");
+                            }
+                            [cleanArr addObject:cleanItem];
+                        }
+                    }
+                    clean[key] = cleanArr;
+                } else {
+                    clean[key] = [val description] ?: @"";
+                }
+            }
+            accountData = clean;
+        }
+
         NSError *err = nil;
         NSData *jsonData = [NSJSONSerialization dataWithJSONObject:accountData options:NSJSONWritingPrettyPrinted error:&err];
         if (!jsonData) { DBLog(@"JSON serialization failed: %@", err); return nil; }
@@ -520,3 +563,4 @@ NSArray *DBInjectSettingsSections(NSArray *originalSections) {
     [result insertObject:section atIndex:0];
     return [result copy];
 }
+
