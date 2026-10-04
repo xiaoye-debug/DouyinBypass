@@ -231,3 +231,23 @@ void DBHookIsAppStoreChannel(void) {
         }
     }
 }
+
+// AWEAppStoreMediator hooks (moved from .xm to avoid Logos block-type parsing issues)
+typedef void (^DBBoolCompletion)(BOOL);
+typedef void (^DBIdCompletion)(id);
+
+static void _db_openURL(id self, SEL _cmd, NSURL *url, DBBoolCompletion completion) {
+    if (completion) completion(YES);
+}
+
+static void _db_initSKStore(id self, SEL _cmd, DBIdCompletion completion) {
+    if (completion) completion(nil);
+}
+
+void DBHookAppStoreMediator(void) {
+    Class cls = NSClassFromString(@"AWEAppStoreMediator");
+    if (!cls) return;
+    MSHookMessageEx(cls, @selector(openURL:completion:), (IMP)_db_openURL, NULL);
+    MSHookMessageEx(cls, @selector(initSKStoreProductVCWithCompletion:), (IMP)_db_initSKStore, NULL);
+    DBLog(@"Hooked AWEAppStoreMediator openURL + initSKStore");
+}

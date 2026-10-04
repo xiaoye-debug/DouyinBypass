@@ -6,41 +6,7 @@
 #import "DBHelpers.h"
 
 // DouyinBypass v2.1.0
-// Target: com.ss.iphone.ugc.Aweme (Douyin)
-//        com.ss.iphone.ugc.aweme.lite (Douyin Lite)
-
-// ============================================================
-#pragma mark - Class Declarations (must be full @interface, not just @class)
-// ============================================================
-
-@interface BDUGCloudkitManager : NSObject
-- (BOOL)isValidMobileProvision;
-- (void)setupCloudKit;
-@end
-
-@interface AWEAccountForceUpgradeManager : NSObject
-+ (instancetype)sharedInstance;
-- (void)checkForceUpgrade;
-- (void)showForceUpgradeDialog;
-- (BOOL)shouldForceUpgrade;
-@end
-
-@interface AWEAppStoreMediator : NSObject
-+ (instancetype)sharedInstance;
-- (void)openURL:(NSURL *)url completion:(void(^)(BOOL))completion;
-- (void)initSKStoreProductVCWithCompletion:(void(^)(id))completion;
-@end
-
-@interface TTAccountSDKSetup : NSObject
-+ (void)startWithConfig:(id)config;
-@end
-
-// Full interface declaration so compiler knows about %new methods
-@interface AWESettingsViewController : UIViewController <UITableViewDataSource, UITableViewDelegate, UIDocumentPickerDelegate>
-- (UITableViewCell *)db_cellForInjectedRow:(UITableView *)tv indexPath:(NSIndexPath *)ip;
-- (void)db_handleInjectedSelection:(NSInteger)row fromVC:(UIViewController *)vc tableView:(UITableView *)tv;
-- (void)db_showBackupListFromVC:(UIViewController *)vc;
-@end
+// All @interface declarations are in DBHelpers.h to avoid Logos block-parsing issues
 
 // ============================================================
 #pragma mark - Bypass Hooks
@@ -64,14 +30,6 @@
 }
 %end
 
-%hook AWEAppStoreMediator
-- (void)openURL:(NSURL *)url completion:(void(^)(BOOL))completion {
-    if (completion) completion(YES);
-}
-- (void)initSKStoreProductVCWithCompletion:(void(^)(id))completion {
-    if (completion) completion(nil);
-}
-%end
 
 %hook TTAccountSDKSetup
 + (void)startWithConfig:(id)config {
@@ -194,7 +152,6 @@
         });
     }
     else if (row == 1) {
-        // iOS 14+ API: use UTType-based initializer
         NSArray<UTType *> *types = @[[UTType typeWithIdentifier:@"com.pkware.zip-archive"] ?: UTTypeData, UTTypeData];
         UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:YES];
         picker.delegate = (id<UIDocumentPickerDelegate>)vc;
@@ -325,4 +282,8 @@
                                                attributes:nil
                                                     error:nil];
     DBHookIsAppStoreChannel();
+    DBHookAppStoreMediator();
 }
+
+
+
