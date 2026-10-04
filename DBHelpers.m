@@ -5,132 +5,173 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 // ============================================================
-#pragma mark - Account Data Extraction
+#pragma mark - Backup Directory (app sandbox)
+// ============================================================
+
+NSString *DBGetBackupDir(void) {
+    static NSString *dir = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        dir = [[paths firstObject] stringByAppendingPathComponent:@"DouyinAccountBackup"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        DBLog(@"Backup dir: %@", dir);
+    });
+    return dir;
+}
+
+// ============================================================
+#pragma mark - Account Data Extraction (with crash protection)
 // ============================================================
 
 NSDictionary *DBExtractAccountData(void) {
     NSMutableDictionary *data = [NSMutableDictionary dictionary];
 
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSArray *accountKeys = @[
-        @"session_key", @"session_secret", @"uid", @"user_id",
-        @"device_id", @"install_id", @"iid", @"aid",
-        @"tt_token", @"access_token", @"refresh_token",
-        @"login_type", @"login_time", @"bind_phone",
-        @"nickname", @"avatar_url", @"sec_uid",
-        @"unique_id", @"short_id", @"account_sdk_source",
-        @"ss_region_code", @"ss_mcc_mnc", @"ss_carrier_region",
-        @"app_language", @"channel", @"update_version_code",
-        @"last_login_uid", @"last_login_type"
-    ];
-    NSMutableDictionary *udData = [NSMutableDictionary dictionary];
-    for (NSString *key in accountKeys) {
-        id val = [defaults objectForKey:key];
-        if (val) udData[key] = val;
-    }
-    NSDictionary *allUD = [defaults dictionaryRepresentation];
-    for (NSString *key in allUD.allKeys) {
-        NSString *lower = key.lowercaseString;
-        if ([lower containsString:@"session"] || [lower containsString:@"token"] ||
-            [lower containsString:@"login"] || [lower containsString:@"account"] ||
-            [lower containsString:@"uid"] || [lower containsString:@"device"] ||
-            [lower containsString:@"cookie"] || [lower containsString:@"auth"]) {
-            if (!udData[key]) udData[key] = allUD[key];
+    // 1. UserDefaults (safe)
+    @try {
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        NSArray *accountKeys = @[
+            @"session_key", @"session_secret", @"uid", @"user_id",
+            @"device_id", @"install_id", @"iid", @"aid",
+            @"tt_token", @"access_token", @"refresh_token",
+            @"login_type", @"login_time", @"bind_phone",
+            @"nickname", @"avatar_url", @"sec_uid",
+            @"unique_id", @"short_id", @"account_sdk_source",
+            @"ss_region_code", @"ss_mcc_mnc", @"ss_carrier_region",
+            @"app_language", @"channel", @"update_version_code",
+            @"last_login_uid", @"last_login_type"
+        ];
+        NSMutableDictionary *udData = [NSMutableDictionary dictionary];
+        for (NSString *key in accountKeys) {
+            id val = [defaults objectForKey:key];
+            if (val) udData[key] = val;
         }
+        NSDictionary *allUD = [defaults dictionaryRepresentation];
+        for (NSString *key in allUD.allKeys) {
+            NSString *lower = key.lowercaseString;
+            if ([lower containsString:@"session"] || [lower containsString:@"token"] ||
+                [lower containsString:@"login"] || [lower containsString:@"account"] ||
+                [lower containsString:@"uid"] || [lower containsString:@"device"] ||
+                [lower containsString:@"cookie"] || [lower containsString:@"auth"]) {
+                if (!udData[key]) udData[key] = allUD[key];
+            }
+        }
+        data[@"userDefaults"] = udData;
+    } @catch (NSException *e) {
+        DBLog(@"UserDefaults extraction exception: %@", e);
+        data[@"userDefaults"] = @{};
     }
-    data[@"userDefaults"] = udData;
 
-    NSMutableArray *keychainItems = [NSMutableArray array];
-    NSArray *secClasses = @[(__bridge id)kSecClassGenericPassword,
-                            (__bridge id)kSecClassInternetPassword];
-    for (id secClass in secClasses) {
-        NSDictionary *query = @{
-            (__bridge id)kSecClass: secClass,
-            (__bridge id)kSecReturnAttributes: @YES,
-            (__bridge id)kSecReturnData: @YES,
-            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
-        };
-        CFTypeRef result = NULL;
-        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-        if (status == errSecSuccess && result) {
-            NSArray *items = (__bridge NSArray *)result;
-            for (NSDictionary *item in items) {
-                NSString *svc = item[(__bridge id)kSecAttrService] ?: @"";
-                NSString *acct = item[(__bridge id)kSecAttrAccount] ?: @"";
-                NSData *d = item[(__bridge id)kSecValueData];
-                NSString *lowerSvc = svc.lowercaseString;
-                NSString *lowerAcct = acct.lowercaseString;
-                BOOL relevant = [lowerSvc containsString:@"douyin"] || [lowerSvc containsString:@"aweme"] ||
-                                [lowerSvc containsString:@"bytedance"] || [lowerSvc containsString:@"toutiao"] ||
-                                [lowerSvc containsString:@"tiktok"] || [lowerSvc containsString:@"ss_"] ||
-                                [lowerAcct containsString:@"session"] || [lowerAcct containsString:@"token"] ||
-                                [lowerAcct containsString:@"account"];
-                if (relevant && d.length > 0) {
-                    [keychainItems addObject:@{
-                        @"service": svc, @"account": acct,
-                        @"data_base64": [d base64EncodedStringWithOptions:0],
-                        @"class": secClass
-                    }];
+    // 2. Keychain (may fail without entitlements)
+    @try {
+        NSMutableArray *keychainItems = [NSMutableArray array];
+        NSArray *secClasses = @[(__bridge id)kSecClassGenericPassword,
+                                (__bridge id)kSecClassInternetPassword];
+        for (id secClass in secClasses) {
+            NSDictionary *query = @{
+                (__bridge id)kSecClass: secClass,
+                (__bridge id)kSecReturnAttributes: @YES,
+                (__bridge id)kSecReturnData: @YES,
+                (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
+            };
+            CFTypeRef result = NULL;
+            OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+            if (status == errSecSuccess && result) {
+                NSArray *items = (__bridge_transfer NSArray *)result;
+                for (NSDictionary *item in items) {
+                    NSString *svc = item[(__bridge id)kSecAttrService] ?: @"";
+                    NSString *acct = item[(__bridge id)kSecAttrAccount] ?: @"";
+                    NSData *d = item[(__bridge id)kSecValueData];
+                    NSString *lowerSvc = svc.lowercaseString;
+                    BOOL relevant = [lowerSvc containsString:@"douyin"] || [lowerSvc containsString:@"aweme"] ||
+                                    [lowerSvc containsString:@"bytedance"] || [lowerSvc containsString:@"toutiao"] ||
+                                    [lowerSvc containsString:@"tiktok"] || [lowerSvc containsString:@"ss_"];
+                    if (relevant && d.length > 0) {
+                        [keychainItems addObject:@{
+                            @"service": svc, @"account": acct,
+                            @"data_base64": [d base64EncodedStringWithOptions:0],
+                            @"class": secClass
+                        }];
+                    }
                 }
             }
-            CFRelease(result);
         }
+        data[@"keychain"] = keychainItems;
+    } @catch (NSException *e) {
+        DBLog(@"Keychain extraction exception: %@", e);
+        data[@"keychain"] = @[];
     }
-    data[@"keychain"] = keychainItems;
 
-    NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-    NSMutableArray *cookies = [NSMutableArray array];
-    for (NSHTTPCookie *cookie in storage.cookies) {
-        NSString *domain = cookie.domain.lowercaseString;
-        if ([domain containsString:@"douyin"] || [domain containsString:@"snssdk"] ||
-            [domain containsString:@"bytedance"] || [domain containsString:@"pstatp"] ||
-            [domain containsString:@"amemv"] || [domain containsString:@"ixigua"] ||
-            [domain containsString:@"toutiao"] || [domain containsString:@"byteimg"]) {
-            [cookies addObject:@{
-                @"name": cookie.name, @"value": cookie.value,
-                @"domain": cookie.domain, @"path": cookie.path ?: @"/",
-                @"secure": @(cookie.isSecure),
-                @"expiresDate": cookie.expiresDate ? @([cookie.expiresDate timeIntervalSince1970]) : @(-1)
-            }];
+    // 3. Cookies (safe)
+    @try {
+        NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+        NSMutableArray *cookies = [NSMutableArray array];
+        for (NSHTTPCookie *cookie in storage.cookies) {
+            NSString *domain = cookie.domain.lowercaseString;
+            if ([domain containsString:@"douyin"] || [domain containsString:@"snssdk"] ||
+                [domain containsString:@"bytedance"] || [domain containsString:@"pstatp"] ||
+                [domain containsString:@"amemv"] || [domain containsString:@"ixigua"] ||
+                [domain containsString:@"toutiao"] || [domain containsString:@"byteimg"]) {
+                [cookies addObject:@{
+                    @"name": cookie.name, @"value": cookie.value,
+                    @"domain": cookie.domain, @"path": cookie.path ?: @"/",
+                    @"secure": @(cookie.isSecure),
+                    @"expiresDate": cookie.expiresDate ? @([cookie.expiresDate timeIntervalSince1970]) : @(-1)
+                }];
+            }
         }
+        data[@"cookies"] = cookies;
+    } @catch (NSException *e) {
+        DBLog(@"Cookie extraction exception: %@", e);
+        data[@"cookies"] = @[];
     }
-    data[@"cookies"] = cookies;
 
-    data[@"metadata"] = @{
-        @"exportTime": @([[NSDate date] timeIntervalSince1970]),
-        @"appVersion": [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"unknown",
-        @"bundleId": [[NSBundle mainBundle] bundleIdentifier] ?: @"unknown",
-        @"deviceModel": [[UIDevice currentDevice] model] ?: @"unknown",
-        @"systemVersion": [[UIDevice currentDevice] systemVersion] ?: @"unknown"
-    };
+    // 4. Metadata (safe)
+    @try {
+        data[@"metadata"] = @{
+            @"exportTime": @([[NSDate date] timeIntervalSince1970]),
+            @"appVersion": [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"unknown",
+            @"bundleId": [[NSBundle mainBundle] bundleIdentifier] ?: @"unknown",
+            @"deviceModel": [[UIDevice currentDevice] model] ?: @"unknown",
+            @"systemVersion": [[UIDevice currentDevice] systemVersion] ?: @"unknown"
+        };
+    } @catch (NSException *e) {
+        DBLog(@"Metadata extraction exception: %@", e);
+        data[@"metadata"] = @{};
+    }
 
     DBLog(@"Extracted: UD=%lu KC=%lu CK=%lu",
-          (unsigned long)udData.count, (unsigned long)keychainItems.count, (unsigned long)cookies.count);
+          (unsigned long)[data[@"userDefaults"] count],
+          (unsigned long)[data[@"keychain"] count],
+          (unsigned long)[data[@"cookies"] count]);
     return [data copy];
 }
 
 // ============================================================
-#pragma mark - Export (JSON file)
+#pragma mark - Export (JSON file to app sandbox)
 // ============================================================
 
-static NSString *const BACKUP_JSON_FMT = @"douyin_account_%@.json";
+NSString *DBPrepareExportJson(void) {
+    @try {
+        NSString *backupDir = DBGetBackupDir();
+        NSString *timestamp = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970]];
+        NSString *fileName = [NSString stringWithFormat:@"douyin_account_%@.json", timestamp];
+        NSString *jsonPath = [backupDir stringByAppendingPathComponent:fileName];
 
-NSString *DBPrepareExportZip(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    [fm createDirectoryAtPath:BACKUP_DIR withIntermediateDirectories:YES attributes:nil error:nil];
+        NSDictionary *accountData = DBExtractAccountData();
+        NSError *err = nil;
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:accountData options:NSJSONWritingPrettyPrinted error:&err];
+        if (!jsonData) { DBLog(@"JSON serialization failed: %@", err); return nil; }
 
-    NSString *timestamp = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970]];
-    NSString *fileName = [NSString stringWithFormat:BACKUP_JSON_FMT, timestamp];
-    NSString *jsonPath = [BACKUP_DIR stringByAppendingPathComponent:fileName];
+        BOOL written = [jsonData writeToFile:jsonPath atomically:YES];
+        if (!written) { DBLog(@"Failed to write JSON to: %@", jsonPath); return nil; }
 
-    NSDictionary *accountData = DBExtractAccountData();
-    NSError *err = nil;
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:accountData options:NSJSONWritingPrettyPrinted error:&err];
-    if (!jsonData) { DBLog(@"JSON serialization failed: %@", err); return nil; }
-    [jsonData writeToFile:jsonPath atomically:YES];
-
-    DBLog(@"Export prepared: %@", jsonPath);
-    return jsonPath;
+        DBLog(@"Export prepared: %@", jsonPath);
+        return jsonPath;
+    } @catch (NSException *e) {
+        DBLog(@"Export exception: %@", e);
+        return nil;
+    }
 }
 
 // ============================================================
@@ -138,56 +179,67 @@ NSString *DBPrepareExportZip(void) {
 // ============================================================
 
 BOOL DBImportAccountFromPath(NSString *filePath) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:filePath]) return NO;
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:filePath]) return NO;
 
-    NSData *jsonData = [NSData dataWithContentsOfFile:filePath];
-    if (!jsonData) return NO;
+        NSData *jsonData = [NSData dataWithContentsOfFile:filePath];
+        if (!jsonData) return NO;
 
-    NSError *err = nil;
-    NSDictionary *accountData = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&err];
-    if (!accountData) { DBLog(@"JSON parse failed: %@", err); return NO; }
+        NSError *err = nil;
+        NSDictionary *accountData = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&err];
+        if (!accountData) { DBLog(@"JSON parse failed: %@", err); return NO; }
 
-    // Restore UserDefaults
-    NSDictionary *udData = accountData[@"userDefaults"];
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    for (NSString *key in udData) [defaults setObject:udData[key] forKey:key];
-    [defaults synchronize];
+        // Restore UserDefaults
+        NSDictionary *udData = accountData[@"userDefaults"];
+        if ([udData isKindOfClass:[NSDictionary class]]) {
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            for (NSString *key in udData) [defaults setObject:udData[key] forKey:key];
+            [defaults synchronize];
+        }
 
-    // Restore Keychain
-    NSArray *kcItems = accountData[@"keychain"];
-    for (NSDictionary *item in kcItems) {
-        NSString *svc = item[@"service"];
-        NSString *acct = item[@"account"];
-        NSData *d = [[NSData alloc] initWithBase64EncodedString:item[@"data_base64"] options:0];
-        id secClass = item[@"class"];
-        if (!svc || !d) continue;
-        NSDictionary *delQ = @{(__bridge id)kSecClass: secClass, (__bridge id)kSecAttrService: svc, (__bridge id)kSecAttrAccount: acct};
-        SecItemDelete((__bridge CFDictionaryRef)delQ);
-        NSMutableDictionary *addQ = [@{(__bridge id)kSecClass: secClass, (__bridge id)kSecAttrService: svc,
-                                       (__bridge id)kSecAttrAccount: acct, (__bridge id)kSecValueData: d} mutableCopy];
-        addQ[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
-        SecItemAdd((__bridge CFDictionaryRef)addQ, NULL);
+        // Restore Keychain
+        NSArray *kcItems = accountData[@"keychain"];
+        if ([kcItems isKindOfClass:[NSArray class]]) {
+            for (NSDictionary *item in kcItems) {
+                NSString *svc = item[@"service"];
+                NSString *acct = item[@"account"];
+                NSData *d = [[NSData alloc] initWithBase64EncodedString:item[@"data_base64"] options:0];
+                id secClass = item[@"class"];
+                if (!svc || !d) continue;
+                NSDictionary *delQ = @{(__bridge id)kSecClass: secClass, (__bridge id)kSecAttrService: svc, (__bridge id)kSecAttrAccount: acct};
+                SecItemDelete((__bridge CFDictionaryRef)delQ);
+                NSMutableDictionary *addQ = [@{(__bridge id)kSecClass: secClass, (__bridge id)kSecAttrService: svc,
+                                               (__bridge id)kSecAttrAccount: acct, (__bridge id)kSecValueData: d} mutableCopy];
+                addQ[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
+                SecItemAdd((__bridge CFDictionaryRef)addQ, NULL);
+            }
+        }
+
+        // Restore Cookies
+        NSArray *cookieData = accountData[@"cookies"];
+        if ([cookieData isKindOfClass:[NSArray class]]) {
+            NSHTTPCookieStorage *ckStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+            for (NSDictionary *cd in cookieData) {
+                NSMutableDictionary *props = [NSMutableDictionary dictionary];
+                props[NSHTTPCookieName] = cd[@"name"];
+                props[NSHTTPCookieValue] = cd[@"value"];
+                props[NSHTTPCookieDomain] = cd[@"domain"];
+                props[NSHTTPCookiePath] = cd[@"path"] ?: @"/";
+                if ([cd[@"secure"] boolValue]) props[NSHTTPCookieSecure] = @"TRUE";
+                double exp = [cd[@"expiresDate"] doubleValue];
+                if (exp > 0) props[NSHTTPCookieExpires] = [NSDate dateWithTimeIntervalSince1970:exp];
+                NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
+                if (cookie) [ckStorage setCookie:cookie];
+            }
+        }
+
+        DBLog(@"Import complete from: %@", filePath);
+        return YES;
+    } @catch (NSException *e) {
+        DBLog(@"Import exception: %@", e);
+        return NO;
     }
-
-    // Restore Cookies
-    NSArray *cookieData = accountData[@"cookies"];
-    NSHTTPCookieStorage *ckStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-    for (NSDictionary *cd in cookieData) {
-        NSMutableDictionary *props = [NSMutableDictionary dictionary];
-        props[NSHTTPCookieName] = cd[@"name"];
-        props[NSHTTPCookieValue] = cd[@"value"];
-        props[NSHTTPCookieDomain] = cd[@"domain"];
-        props[NSHTTPCookiePath] = cd[@"path"] ?: @"/";
-        if ([cd[@"secure"] boolValue]) props[NSHTTPCookieSecure] = @"TRUE";
-        double exp = [cd[@"expiresDate"] doubleValue];
-        if (exp > 0) props[NSHTTPCookieExpires] = [NSDate dateWithTimeIntervalSince1970:exp];
-        NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
-        if (cookie) [ckStorage setCookie:cookie];
-    }
-
-    DBLog(@"Import complete from: %@", filePath);
-    return YES;
 }
 
 // ============================================================
@@ -260,128 +312,132 @@ static UIViewController *DBTopViewController(void) {
 
 void DBPresentControlPanel(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *presenter = DBTopViewController();
-        if (!presenter) return;
+        @try {
+            UIViewController *presenter = DBTopViewController();
+            if (!presenter) return;
 
-        UIAlertController *panel = [UIAlertController alertControllerWithTitle:@"DouyinBypass 账号管理"
-            message:@"选择操作" preferredStyle:UIAlertControllerStyleActionSheet];
+            UIAlertController *panel = [UIAlertController alertControllerWithTitle:@"DouyinBypass 账号管理"
+                message:@"选择操作" preferredStyle:UIAlertControllerStyleActionSheet];
 
-        [panel addAction:[UIAlertAction actionWithTitle:@"导出当前账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-                NSString *jsonPath = DBPrepareExportZip();
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (!jsonPath) {
-                        UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导出失败" message:@"请检查日志" preferredStyle:UIAlertControllerStyleAlert];
-                        [err addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                        [DBTopViewController() presentViewController:err animated:YES completion:nil];
-                        return;
-                    }
-                    NSURL *fileURL = [NSURL fileURLWithPath:jsonPath];
-                    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[fileURL]];
-                    picker.modalPresentationStyle = UIModalPresentationFormSheet;
-                    objc_setAssociatedObject(picker, "db_export_path", jsonPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    DBDocumentPickerDelegate *del = [[DBDocumentPickerDelegate alloc] init];
-                    picker.delegate = del;
-                    objc_setAssociatedObject(picker, "db_delegate_retain", del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    [DBTopViewController() presentViewController:picker animated:YES completion:nil];
-                });
-            });
-        }]];
-
-        [panel addAction:[UIAlertAction actionWithTitle:@"导入账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            NSArray<UTType *> *types = @[UTTypeJSON, UTTypeData];
-            UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:YES];
-            picker.modalPresentationStyle = UIModalPresentationFormSheet;
-            picker.allowsMultipleSelection = NO;
-            DBDocumentPickerDelegate *del = [[DBDocumentPickerDelegate alloc] init];
-            picker.delegate = del;
-            objc_setAssociatedObject(picker, "db_delegate_retain", del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [DBTopViewController() presentViewController:picker animated:YES completion:nil];
-        }]];
-
-        [panel addAction:[UIAlertAction actionWithTitle:@"查看备份列表" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            NSFileManager *fm = [NSFileManager defaultManager];
-            NSArray *files = [fm contentsOfDirectoryAtPath:BACKUP_DIR error:nil];
-            NSMutableArray *info = [NSMutableArray array];
-            for (NSString *f in files) {
-                if ([f hasSuffix:@".json"]) {
-                    NSString *full = [BACKUP_DIR stringByAppendingPathComponent:f];
-                    NSDictionary *attr = [fm attributesOfItemAtPath:full error:nil];
-                    unsigned long long size = attr.fileSize;
-                    NSDate *date = attr.fileModificationDate;
-                    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
-                    fmt.dateFormat = @"yyyy-MM-dd HH:mm";
-                    [info addObject:[NSString stringWithFormat:@"%@  (%.1f KB, %@)", f, size/1024.0, [fmt stringFromDate:date]]];
+            [panel addAction:[UIAlertAction actionWithTitle:@"导出当前账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                // Run export on main thread to avoid UIKit threading issues
+                NSString *jsonPath = DBPrepareExportJson();
+                if (!jsonPath) {
+                    UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导出失败" message:@"请检查日志" preferredStyle:UIAlertControllerStyleAlert];
+                    [err addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                    [DBTopViewController() presentViewController:err animated:YES completion:nil];
+                    return;
                 }
-            }
-            [info sortUsingSelector:@selector(compare:)];
-            NSString *msg = info.count > 0 ? [[info reverseObjectEnumerator].allObjects componentsJoinedByString:@"\n\n"] : @"暂无备份文件";
-            UIAlertController *list = [UIAlertController alertControllerWithTitle:@"备份列表" message:msg preferredStyle:UIAlertControllerStyleAlert];
-            if (info.count > 0) {
-                [list addAction:[UIAlertAction actionWithTitle:@"清除所有备份" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *aa) {
-                    [fm removeItemAtPath:BACKUP_DIR error:nil];
-                    [fm createDirectoryAtPath:BACKUP_DIR withIntermediateDirectories:YES attributes:nil error:nil];
-                }]];
-            }
-            [list addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
-            [DBTopViewController() presentViewController:list animated:YES completion:nil];
-        }]];
+                NSURL *fileURL = [NSURL fileURLWithPath:jsonPath];
+                UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[fileURL]];
+                picker.modalPresentationStyle = UIModalPresentationFormSheet;
+                objc_setAssociatedObject(picker, "db_export_path", jsonPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                DBDocumentPickerDelegate *del = [[DBDocumentPickerDelegate alloc] init];
+                picker.delegate = del;
+                objc_setAssociatedObject(picker, "db_delegate_retain", del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [DBTopViewController() presentViewController:picker animated:YES completion:nil];
+            }]];
 
-        [panel addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [panel addAction:[UIAlertAction actionWithTitle:@"导入账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                NSArray<UTType *> *types = @[UTTypeJSON, UTTypeData];
+                UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:YES];
+                picker.modalPresentationStyle = UIModalPresentationFormSheet;
+                picker.allowsMultipleSelection = NO;
+                DBDocumentPickerDelegate *del = [[DBDocumentPickerDelegate alloc] init];
+                picker.delegate = del;
+                objc_setAssociatedObject(picker, "db_delegate_retain", del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [DBTopViewController() presentViewController:picker animated:YES completion:nil];
+            }]];
 
-        if (panel.popoverPresentationController) {
-            panel.popoverPresentationController.sourceView = presenter.view;
-            panel.popoverPresentationController.sourceRect = CGRectMake(presenter.view.bounds.size.width/2, presenter.view.bounds.size.height/2, 1, 1);
+            [panel addAction:[UIAlertAction actionWithTitle:@"查看备份列表" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                NSFileManager *fm = [NSFileManager defaultManager];
+                NSString *backupDir = DBGetBackupDir();
+                NSArray *files = [fm contentsOfDirectoryAtPath:backupDir error:nil];
+                NSMutableArray *info = [NSMutableArray array];
+                for (NSString *f in files) {
+                    if ([f hasSuffix:@".json"]) {
+                        NSString *full = [backupDir stringByAppendingPathComponent:f];
+                        NSDictionary *attr = [fm attributesOfItemAtPath:full error:nil];
+                        unsigned long long size = attr.fileSize;
+                        NSDate *date = attr.fileModificationDate;
+                        NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+                        fmt.dateFormat = @"yyyy-MM-dd HH:mm";
+                        [info addObject:[NSString stringWithFormat:@"%@  (%.1f KB, %@)", f, size/1024.0, [fmt stringFromDate:date]]];
+                    }
+                }
+                [info sortUsingSelector:@selector(compare:)];
+                NSString *msg = info.count > 0 ? [[info reverseObjectEnumerator].allObjects componentsJoinedByString:@"\n\n"] : @"暂无备份文件";
+                UIAlertController *list = [UIAlertController alertControllerWithTitle:@"备份列表" message:msg preferredStyle:UIAlertControllerStyleAlert];
+                if (info.count > 0) {
+                    [list addAction:[UIAlertAction actionWithTitle:@"清除所有备份" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *aa) {
+                        [fm removeItemAtPath:backupDir error:nil];
+                        [fm createDirectoryAtPath:backupDir withIntermediateDirectories:YES attributes:nil error:nil];
+                    }]];
+                }
+                [list addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+                [DBTopViewController() presentViewController:list animated:YES completion:nil];
+            }]];
+
+            [panel addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+            if (panel.popoverPresentationController) {
+                panel.popoverPresentationController.sourceView = presenter.view;
+                panel.popoverPresentationController.sourceRect = CGRectMake(presenter.view.bounds.size.width/2, presenter.view.bounds.size.height/2, 1, 1);
+            }
+            [presenter presentViewController:panel animated:YES completion:nil];
+        } @catch (NSException *e) {
+            DBLog(@"Panel presentation exception: %@", e);
         }
-        [presenter presentViewController:panel animated:YES completion:nil];
     });
 }
 
 @implementation DBDocumentPickerDelegate
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    NSString *exportPath = objc_getAssociatedObject(controller, "db_export_path");
-    if (exportPath) {
-        objc_setAssociatedObject(controller, "db_export_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        NSString *msg = [NSString stringWithFormat:@"已保存到:\n%@", urls.firstObject.path];
-        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导出成功" message:msg preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-        [DBTopViewController() presentViewController:a animated:YES completion:nil];
-        return;
-    }
+    @try {
+        NSString *exportPath = objc_getAssociatedObject(controller, "db_export_path");
+        if (exportPath) {
+            objc_setAssociatedObject(controller, "db_export_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            NSString *msg = [NSString stringWithFormat:@"已保存到:\n%@", urls.firstObject.path];
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导出成功" message:msg preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+            [DBTopViewController() presentViewController:a animated:YES completion:nil];
+            return;
+        }
 
-    NSURL *pickedURL = urls.firstObject;
-    if (!pickedURL) return;
-    BOOL scoped = [pickedURL startAccessingSecurityScopedResource];
+        NSURL *pickedURL = urls.firstObject;
+        if (!pickedURL) return;
+        BOOL scoped = [pickedURL startAccessingSecurityScopedResource];
 
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *tempPath = [BACKUP_DIR stringByAppendingPathComponent:@"import_picked.json"];
+        NSString *tempPath = [DBGetBackupDir() stringByAppendingPathComponent:@"import_picked.json"];
         [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
         NSError *copyErr = nil;
         [[NSFileManager defaultManager] copyItemAtURL:pickedURL toURL:[NSURL fileURLWithPath:tempPath] error:&copyErr];
         if (scoped) [pickedURL stopAccessingSecurityScopedResource];
 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (copyErr) {
-                UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入失败" message:copyErr.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-                [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                [DBTopViewController() presentViewController:a animated:YES completion:nil];
-                return;
-            }
-            BOOL ok = DBImportAccountFromPath(tempPath);
-            [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
-            if (ok) {
-                UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入成功" message:@"账号信息已恢复，请重启抖音以生效。" preferredStyle:UIAlertControllerStyleAlert];
-                [a addAction:[UIAlertAction actionWithTitle:@"立即重启" style:UIAlertActionStyleDefault handler:^(UIAlertAction *aa) { exit(0); }]];
-                [a addAction:[UIAlertAction actionWithTitle:@"稍后重启" style:UIAlertActionStyleCancel handler:nil]];
-                [DBTopViewController() presentViewController:a animated:YES completion:nil];
-            } else {
-                UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"文件格式不正确或已损坏" preferredStyle:UIAlertControllerStyleAlert];
-                [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                [DBTopViewController() presentViewController:a animated:YES completion:nil];
-            }
-        });
-    });
+        if (copyErr) {
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入失败" message:copyErr.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+            [DBTopViewController() presentViewController:a animated:YES completion:nil];
+            return;
+        }
+
+        BOOL ok = DBImportAccountFromPath(tempPath);
+        [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
+
+        if (ok) {
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入成功" message:@"账号信息已恢复，请重启抖音以生效。" preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"立即重启" style:UIAlertActionStyleDefault handler:^(UIAlertAction *aa) { exit(0); }]];
+            [a addAction:[UIAlertAction actionWithTitle:@"稍后重启" style:UIAlertActionStyleCancel handler:nil]];
+            [DBTopViewController() presentViewController:a animated:YES completion:nil];
+        } else {
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"文件格式不正确或已损坏" preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+            [DBTopViewController() presentViewController:a animated:YES completion:nil];
+        }
+    } @catch (NSException *e) {
+        DBLog(@"DocumentPicker exception: %@", e);
+    }
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {

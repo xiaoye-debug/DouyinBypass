@@ -4,13 +4,12 @@
 #define LOG_TAG @"[DouyinBypass]"
 #define DBLog(fmt, ...) NSLog(@"%@ " fmt, LOG_TAG, ##__VA_ARGS__)
 
-#define BACKUP_DIR @"/var/mobile/Documents/DouyinAccountBackup"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-NSString *DBPrepareExportZip(void);
+NSString *DBGetBackupDir(void);
+NSString *DBPrepareExportJson(void);
 BOOL DBImportAccountFromPath(NSString *filePath);
 void DBHookIsAppStoreChannel(void);
 void DBHookAppStoreMediator(void);

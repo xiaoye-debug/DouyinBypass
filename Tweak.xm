@@ -4,8 +4,7 @@
 #import <substrate.h>
 #import "DBHelpers.h"
 
-// DouyinBypass v2.2.0
-// Settings injection follows DY-tools pattern: hook AWESettingsViewModel sectionDataArray
+// DouyinBypass v2.2.1
 
 // ============================================================
 #pragma mark - Bypass Hooks
@@ -51,15 +50,9 @@
 // ============================================================
 
 %ctor {
-    DBLog(@"DouyinBypass v2.2.0 loaded");
-
-    [[NSFileManager defaultManager] createDirectoryAtPath:BACKUP_DIR
-                              withIntermediateDirectories:YES
-                                               attributes:nil
-                                                    error:nil];
-
+    DBLog(@"DouyinBypass v2.2.1 loaded");
+    DBGetBackupDir();
     DBHookIsAppStoreChannel();
     DBHookAppStoreMediator();
-
     DBLog(@"All hooks installed");
 }
