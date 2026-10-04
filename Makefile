@@ -10,30 +10,38 @@ DouyinBypass_FILES = Tweak.xm
 DouyinBypass_CFLAGS = -fobjc-arc
 DouyinBypass_FRAMEWORKS = Foundation UIKit Security
 
-# === Target 2: Dynamic Library (for IPA injection) ===
-LIBRARY_NAME = DouyinBypassLib
-DouyinBypassLib_FILES = Tweak.xm
-DouyinBypassLib_CFLAGS = -fobjc-arc
-DouyinBypassLib_FRAMEWORKS = Foundation UIKit Security
-DouyinBypassLib_INSTALL_PATH = /Library/Application Support/DouyinBypass
-
 include $(THEOS_MAKE_PATH)/tweak.mk
-include $(THEOS_MAKE_PATH)/library.mk
 
-# Package dylib for IPA injection
-package-dylib::
+# === Build dylib manually (avoids library.mk stage issues on CI) ===
+DYLIB_DIR = .theos/obj/dylib
+
+$(DYLIB_DIR)/Tweak.xm.mm: Tweak.xm
+	@mkdir -p $(DYLIB_DIR)
+	$(THEOS_BIN_PATH)/logos.pl Tweak.xm > $@
+
+$(DYLIB_DIR)/DouyinBypass.dylib: $(DYLIB_DIR)/Tweak.xm.mm
+	$(TARGET_CC) -dynamiclib \
+		-arch arm64 -arch arm64e \
+		-miphoneos-version-min=15.0 \
+		-fobjc-arc -fobjc-weak \
+		-isysroot "$(THEOS_SDK_PATH)" \
+		-I"$(THEOS_INCLUDE_PATH)" \
+		-F"$(THEOS_VENDOR_LIB_PATH)" \
+		-framework Foundation -framework UIKit -framework Security \
+		-lobjc -lsubstrate \
+		-o $@ $<
+
+build-dylib: $(DYLIB_DIR)/DouyinBypass.dylib
 	@mkdir -p packages
-	@cp $(THEOS_OBJ_DIR)/libDouyinBypassLib.dylib packages/DouyinBypass.dylib 2>/dev/null || cp .theos/obj/debug/libDouyinBypassLib.dylib packages/DouyinBypass.dylib 2>/dev/null || true
-	@if [ -f packages/DouyinBypass.dylib ]; then echo "[OK] packages/DouyinBypass.dylib"; ldid -S packages/DouyinBypass.dylib; else echo "[WARN] dylib not found"; fi
+	cp $< packages/DouyinBypass.dylib
+	@if command -v ldid >/dev/null 2>&1; then ldid -S packages/DouyinBypass.dylib; fi
+	@echo "[OK] packages/DouyinBypass.dylib ($$(ls -lh packages/DouyinBypass.dylib | awk '{print $$5}'))"
 
 # Build everything: deb + dylib
-package-all::
-	@$(MAKE) package FINALPACKAGE=1
-	@$(MAKE) package-dylib
+package-all: package build-dylib
 	@echo ""
 	@echo "=== Build Complete ==="
-	@echo "  DEB:   packages/*.deb"
-	@echo "  Dylib: packages/DouyinBypass.dylib"
+	@ls -la packages/
 	@echo ""
 
 after-install::

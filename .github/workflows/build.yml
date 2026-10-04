@@ -17,14 +17,22 @@ jobs:
 
     - name: Setup Theos
       run: |
-        export THEOS=$HOME/theos
-        git clone --recursive https://github.com/theos/theos.git $THEOS
-        brew install ldid
+        git clone --recursive https://github.com/theos/theos.git $HOME/theos
+        brew install ldid dpkg
 
-    - name: Build All (DEB + Dylib + Framework)
+    - name: Build DEB (Tweak)
+      env:
+        THEOS: ${{ github.workspace }}/../../theos
       run: |
         export THEOS=$HOME/theos
-        make package-all FINALPACKAGE=1
+        make package FINALPACKAGE=1
+
+    - name: Build Dylib (IPA Injection)
+      env:
+        THEOS: ${{ github.workspace }}/../../theos
+      run: |
+        export THEOS=$HOME/theos
+        make build-dylib
 
     - name: Upload DEB (Jailbreak)
       uses: actions/upload-artifact@v4
@@ -49,4 +57,3 @@ jobs:
           packages/DouyinBypass.dylib
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
