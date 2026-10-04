@@ -6,15 +6,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 
-DBMenuItem gDBMenuItems[] = {
-    {"\xe2\x99\xa1", "\xe5\xaf\xbc\xe5\x87\xba\xe8\xb4\xa6\xe5\x8f\xb7\xe4\xbf\xa1\xe6\x81\xaf", "\xe4\xbf\x9d\xe5\xad\x98"},
-    {"\xe2\x98\x86", "\xe5\xaf\xbc\xe5\x85\xa5\xe8\xb4\xa6\xe5\x8f\xb7\xe4\xbf\xa1\xe6\x81\xaf", "\xe9\x80\x89\xe6\x8b\xa9"},
-    {"\xe2\x98\x81", "\xe6\x9f\xa5\xe7\x9c\x8b\xe5\xa4\x87\xe4\xbb\xbd\xe5\x88\x97\xe8\xa1\xa8", "\xe7\xae\xa1\xe7\x90\x86"},
-};
-
-NSInteger DBRealSection(NSInteger displaySection) {
-    return displaySection - 1;
-}
+// v2.2: DBMenuItem and DBRealSection removed (no longer needed with AWESettingsViewModel pattern)
 
 NSDictionary *DBExtractAccountData(void) {
     NSMutableDictionary *data = [NSMutableDictionary dictionary];
@@ -266,7 +258,8 @@ void DBHookAppStoreMediator(void) {
 
 
 
-@class DBDocumentPickerDelegate;
+@interface DBDocumentPickerDelegate : NSObject <UIDocumentPickerDelegate>
+@end
 
 // ============================================================
 #pragma mark - Settings Panel & Entry Item (DY-tools pattern)
@@ -482,4 +475,5 @@ NSArray *DBInjectSettingsSections(NSArray *originalSections) {
     [result insertObject:section atIndex:0];
     return [result copy];
 }
+
 
