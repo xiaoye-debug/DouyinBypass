@@ -3,10 +3,10 @@
 #import <objc/runtime.h>
 #import <substrate.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-#include <spawn.h>
-#include <sys/wait.h>
 
-// v2.2: DBMenuItem and DBRealSection removed (no longer needed with AWESettingsViewModel pattern)
+// ============================================================
+#pragma mark - Account Data Extraction
+// ============================================================
 
 NSDictionary *DBExtractAccountData(void) {
     NSMutableDictionary *data = [NSMutableDictionary dictionary];
@@ -109,74 +109,52 @@ NSDictionary *DBExtractAccountData(void) {
     return [data copy];
 }
 
-extern char **environ;
+// ============================================================
+#pragma mark - Export (JSON file)
+// ============================================================
 
-static int DBSpawnAndWait(const char *path, char *const argv[]) {
-    pid_t pid;
-    int status = posix_spawn(&pid, path, NULL, NULL, argv, environ);
-    if (status != 0) return -1;
-    waitpid(pid, &status, 0);
-    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-}
-
-static BOOL DBCreateZipFromDirectory(NSString *srcDir, NSString *dstZip) {
-    const char *argv[] = {"/usr/bin/zip", "-r", "-j", [dstZip UTF8String], [srcDir UTF8String], NULL};
-    int ret = DBSpawnAndWait("/usr/bin/zip", (char *const *)argv);
-    return ret == 0 && [[NSFileManager defaultManager] fileExistsAtPath:dstZip];
-}
-
-static BOOL DBUnzipToDirectory(NSString *srcZip, NSString *dstDir) {
-    [[NSFileManager defaultManager] createDirectoryAtPath:dstDir withIntermediateDirectories:YES attributes:nil error:nil];
-    const char *argv[] = {"/usr/bin/unzip", "-o", [srcZip UTF8String], "-d", [dstDir UTF8String], NULL};
-    int ret = DBSpawnAndWait("/usr/bin/unzip", (char *const *)argv);
-    return ret == 0;
-}
+static NSString *const BACKUP_JSON_FMT = @"douyin_account_%@.json";
 
 NSString *DBPrepareExportZip(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     [fm createDirectoryAtPath:BACKUP_DIR withIntermediateDirectories:YES attributes:nil error:nil];
 
     NSString *timestamp = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970]];
-    NSString *tempDir = [BACKUP_DIR stringByAppendingPathComponent:[NSString stringWithFormat:@"temp_%@", timestamp]];
-    [fm createDirectoryAtPath:tempDir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *fileName = [NSString stringWithFormat:BACKUP_JSON_FMT, timestamp];
+    NSString *jsonPath = [BACKUP_DIR stringByAppendingPathComponent:fileName];
 
     NSDictionary *accountData = DBExtractAccountData();
-    NSString *jsonPath = [tempDir stringByAppendingPathComponent:@"account_data.json"];
     NSError *err = nil;
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:accountData options:NSJSONWritingPrettyPrinted error:&err];
-    if (!jsonData) { DBLog(@"JSON failed: %@", err); return nil; }
+    if (!jsonData) { DBLog(@"JSON serialization failed: %@", err); return nil; }
     [jsonData writeToFile:jsonPath atomically:YES];
 
-    NSString *zipName = [NSString stringWithFormat:BACKUP_FILENAME_FMT, timestamp];
-    NSString *zipPath = [BACKUP_DIR stringByAppendingPathComponent:zipName];
-    if (!DBCreateZipFromDirectory(tempDir, zipPath)) { DBLog(@"ZIP failed"); return nil; }
-
-    [fm removeItemAtPath:tempDir error:nil];
-    DBLog(@"Export prepared: %@", zipPath);
-    return zipPath;
+    DBLog(@"Export prepared: %@", jsonPath);
+    return jsonPath;
 }
 
-BOOL DBImportAccountFromPath(NSString *zipPath) {
+// ============================================================
+#pragma mark - Import (JSON file)
+// ============================================================
+
+BOOL DBImportAccountFromPath(NSString *filePath) {
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:zipPath]) return NO;
+    if (![fm fileExistsAtPath:filePath]) return NO;
 
-    NSString *tempDir = [BACKUP_DIR stringByAppendingPathComponent:@"import_temp"];
-    [fm removeItemAtPath:tempDir error:nil];
-    if (!DBUnzipToDirectory(zipPath, tempDir)) return NO;
-
-    NSString *jsonPath = [tempDir stringByAppendingPathComponent:@"account_data.json"];
-    NSData *jsonData = [NSData dataWithContentsOfFile:jsonPath];
+    NSData *jsonData = [NSData dataWithContentsOfFile:filePath];
     if (!jsonData) return NO;
 
     NSError *err = nil;
     NSDictionary *accountData = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&err];
-    if (!accountData) return NO;
+    if (!accountData) { DBLog(@"JSON parse failed: %@", err); return NO; }
 
+    // Restore UserDefaults
     NSDictionary *udData = accountData[@"userDefaults"];
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     for (NSString *key in udData) [defaults setObject:udData[key] forKey:key];
     [defaults synchronize];
 
+    // Restore Keychain
     NSArray *kcItems = accountData[@"keychain"];
     for (NSDictionary *item in kcItems) {
         NSString *svc = item[@"service"];
@@ -192,6 +170,7 @@ BOOL DBImportAccountFromPath(NSString *zipPath) {
         SecItemAdd((__bridge CFDictionaryRef)addQ, NULL);
     }
 
+    // Restore Cookies
     NSArray *cookieData = accountData[@"cookies"];
     NSHTTPCookieStorage *ckStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     for (NSDictionary *cd in cookieData) {
@@ -207,10 +186,13 @@ BOOL DBImportAccountFromPath(NSString *zipPath) {
         if (cookie) [ckStorage setCookie:cookie];
     }
 
-    [fm removeItemAtPath:tempDir error:nil];
-    DBLog(@"Import complete from: %@", zipPath);
+    DBLog(@"Import complete from: %@", filePath);
     return YES;
 }
+
+// ============================================================
+#pragma mark - Bypass Hooks (runtime)
+// ============================================================
 
 static BOOL _db_isAppStoreChannel(id self, SEL _cmd) {
     return YES;
@@ -224,19 +206,16 @@ void DBHookIsAppStoreChannel(void) {
     for (NSString *clsName in classNames) {
         Class cls = NSClassFromString(clsName);
         if (cls && [cls instancesRespondToSelector:@selector(isAppStoreChannel)]) {
-            MSHookMessageEx(cls, @selector(isAppStoreChannel),
-                           (IMP)_db_isAppStoreChannel, NULL);
+            MSHookMessageEx(cls, @selector(isAppStoreChannel), (IMP)_db_isAppStoreChannel, NULL);
             DBLog(@"Hooked isAppStoreChannel on %@", clsName);
         }
         if (cls && [cls respondsToSelector:@selector(isAppStoreChannel)]) {
-            MSHookMessageEx(object_getClass(cls), @selector(isAppStoreChannel),
-                           (IMP)_db_isAppStoreChannel, NULL);
+            MSHookMessageEx(object_getClass(cls), @selector(isAppStoreChannel), (IMP)_db_isAppStoreChannel, NULL);
             DBLog(@"Hooked +isAppStoreChannel on %@", clsName);
         }
     }
 }
 
-// AWEAppStoreMediator hooks (moved from .xm to avoid Logos block-type parsing issues)
 typedef void (^DBBoolCompletion)(BOOL);
 typedef void (^DBIdCompletion)(id);
 
@@ -256,14 +235,12 @@ void DBHookAppStoreMediator(void) {
     DBLog(@"Hooked AWEAppStoreMediator openURL + initSKStore");
 }
 
-
-
-@interface DBDocumentPickerDelegate : NSObject <UIDocumentPickerDelegate>
-@end
-
 // ============================================================
 #pragma mark - Settings Panel & Entry Item (DY-tools pattern)
 // ============================================================
+
+@interface DBDocumentPickerDelegate : NSObject <UIDocumentPickerDelegate>
+@end
 
 static UIViewController *DBTopViewController(void) {
     UIWindow *window = nil;
@@ -291,19 +268,18 @@ void DBPresentControlPanel(void) {
 
         [panel addAction:[UIAlertAction actionWithTitle:@"导出当前账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-                NSString *zipPath = DBPrepareExportZip();
+                NSString *jsonPath = DBPrepareExportZip();
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    if (!zipPath) {
+                    if (!jsonPath) {
                         UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导出失败" message:@"请检查日志" preferredStyle:UIAlertControllerStyleAlert];
                         [err addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                         [DBTopViewController() presentViewController:err animated:YES completion:nil];
                         return;
                     }
-                    NSURL *fileURL = [NSURL fileURLWithPath:zipPath];
+                    NSURL *fileURL = [NSURL fileURLWithPath:jsonPath];
                     UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[fileURL]];
                     picker.modalPresentationStyle = UIModalPresentationFormSheet;
-                    objc_setAssociatedObject(picker, "db_export_zip_path", zipPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    // Use a delegate proxy to handle the picker result
+                    objc_setAssociatedObject(picker, "db_export_path", jsonPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                     DBDocumentPickerDelegate *del = [[DBDocumentPickerDelegate alloc] init];
                     picker.delegate = del;
                     objc_setAssociatedObject(picker, "db_delegate_retain", del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -313,7 +289,7 @@ void DBPresentControlPanel(void) {
         }]];
 
         [panel addAction:[UIAlertAction actionWithTitle:@"导入账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            NSArray<UTType *> *types = @[[UTType typeWithIdentifier:@"com.pkware.zip-archive"] ?: UTTypeData, UTTypeData];
+            NSArray<UTType *> *types = @[UTTypeJSON, UTTypeData];
             UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:YES];
             picker.modalPresentationStyle = UIModalPresentationFormSheet;
             picker.allowsMultipleSelection = NO;
@@ -328,7 +304,7 @@ void DBPresentControlPanel(void) {
             NSArray *files = [fm contentsOfDirectoryAtPath:BACKUP_DIR error:nil];
             NSMutableArray *info = [NSMutableArray array];
             for (NSString *f in files) {
-                if ([f hasSuffix:@".zip"]) {
+                if ([f hasSuffix:@".json"]) {
                     NSString *full = [BACKUP_DIR stringByAppendingPathComponent:f];
                     NSDictionary *attr = [fm attributesOfItemAtPath:full error:nil];
                     unsigned long long size = attr.fileSize;
@@ -361,14 +337,12 @@ void DBPresentControlPanel(void) {
     });
 }
 
-// Document picker delegate (separate class to avoid block-in-.xm issues)
-
 @implementation DBDocumentPickerDelegate
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    NSString *exportZip = objc_getAssociatedObject(controller, "db_export_zip_path");
-    if (exportZip) {
-        objc_setAssociatedObject(controller, "db_export_zip_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSString *exportPath = objc_getAssociatedObject(controller, "db_export_path");
+    if (exportPath) {
+        objc_setAssociatedObject(controller, "db_export_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         NSString *msg = [NSString stringWithFormat:@"已保存到:\n%@", urls.firstObject.path];
         UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导出成功" message:msg preferredStyle:UIAlertControllerStyleAlert];
         [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
@@ -381,7 +355,7 @@ void DBPresentControlPanel(void) {
     BOOL scoped = [pickedURL startAccessingSecurityScopedResource];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *tempPath = [BACKUP_DIR stringByAppendingPathComponent:@"import_picked.zip"];
+        NSString *tempPath = [BACKUP_DIR stringByAppendingPathComponent:@"import_picked.json"];
         [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
         NSError *copyErr = nil;
         [[NSFileManager defaultManager] copyItemAtURL:pickedURL toURL:[NSURL fileURLWithPath:tempPath] error:&copyErr];
@@ -411,7 +385,7 @@ void DBPresentControlPanel(void) {
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
-    objc_setAssociatedObject(controller, "db_export_zip_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(controller, "db_export_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 @end
@@ -453,7 +427,6 @@ id DBMakeSettingsSection(id entryItem) {
 NSArray *DBInjectSettingsSections(NSArray *originalSections) {
     if (![originalSections isKindOfClass:[NSArray class]]) return originalSections;
 
-    // Check if already injected
     for (id section in originalSections) {
         NSArray *items = nil;
         @try { items = [section valueForKey:@"itemArray"]; } @catch (__unused NSException *e) {}
@@ -473,6 +446,3 @@ NSArray *DBInjectSettingsSections(NSArray *originalSections) {
     [result insertObject:section atIndex:0];
     return [result copy];
 }
-
-
-

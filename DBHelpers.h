@@ -5,18 +5,15 @@
 #define DBLog(fmt, ...) NSLog(@"%@ " fmt, LOG_TAG, ##__VA_ARGS__)
 
 #define BACKUP_DIR @"/var/mobile/Documents/DouyinAccountBackup"
-#define BACKUP_FILENAME_FMT @"douyin_account_%@.zip"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 NSString *DBPrepareExportZip(void);
-BOOL DBImportAccountFromPath(NSString *zipPath);
+BOOL DBImportAccountFromPath(NSString *filePath);
 void DBHookIsAppStoreChannel(void);
 void DBHookAppStoreMediator(void);
-
-// Settings injection (called from %ctor via MSHookMessageEx or from %hook)
 id DBMakeSettingsEntryItem(void);
 id DBMakeSettingsSection(id entryItem);
 NSArray *DBInjectSettingsSections(NSArray *originalSections);
@@ -26,7 +23,6 @@ void DBPresentControlPanel(void);
 }
 #endif
 
-// Douyin settings model classes (declared here to keep .xm clean of block syntax)
 @interface AWESettingItemModel : NSObject
 @property(nonatomic,copy) NSString *identifier;
 @property(nonatomic,copy) NSString *title;
@@ -55,7 +51,6 @@ void DBPresentControlPanel(void);
 @property(nonatomic,assign) NSInteger colorStyle;
 @end
 
-// Bypass target classes
 @interface BDUGCloudkitManager : NSObject
 - (BOOL)isValidMobileProvision;
 - (void)setupCloudKit;
