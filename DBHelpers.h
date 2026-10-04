@@ -15,6 +15,10 @@ typedef struct {
     const char *detail;
 } DBMenuItem;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern DBMenuItem gDBMenuItems[];
 
 NSInteger DBRealSection(NSInteger displaySection);
@@ -22,6 +26,11 @@ NSDictionary *DBExtractAccountData(void);
 NSString *DBPrepareExportZip(void);
 BOOL DBImportAccountFromPath(NSString *zipPath);
 void DBHookIsAppStoreChannel(void);
+void DBHookAppStoreMediator(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 // Class declarations with block-typed parameters (must be outside .xm to avoid Logos parsing issues)
 @interface BDUGCloudkitManager : NSObject
@@ -51,5 +60,3 @@ void DBHookIsAppStoreChannel(void);
 - (void)db_handleInjectedSelection:(NSInteger)row fromVC:(UIViewController *)vc tableView:(UITableView *)tv;
 - (void)db_showBackupListFromVC:(UIViewController *)vc;
 @end
-void DBHookAppStoreMediator(void);
-
