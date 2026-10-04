@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 # === Target 1: Tweak (DEB for jailbreak) ===
 TWEAK_NAME = DouyinBypass
-DouyinBypass_FILES = Tweak.xm
+DouyinBypass_FILES = Tweak.xm DBHelpers.m
 DouyinBypass_CFLAGS = -fobjc-arc
 DouyinBypass_FRAMEWORKS = Foundation UIKit Security
 
@@ -19,7 +19,7 @@ $(DYLIB_DIR)/Tweak.xm.mm: Tweak.xm
 	@mkdir -p $(DYLIB_DIR)
 	$(THEOS_BIN_PATH)/logos.pl Tweak.xm > $@
 
-$(DYLIB_DIR)/DouyinBypass.dylib: $(DYLIB_DIR)/Tweak.xm.mm
+$(DYLIB_DIR)/DouyinBypass.dylib: $(DYLIB_DIR)/Tweak.xm.mm DBHelpers.m
 	$(TARGET_CC) -dynamiclib \
 		-arch arm64 -arch arm64e \
 		-miphoneos-version-min=15.0 \
@@ -29,7 +29,7 @@ $(DYLIB_DIR)/DouyinBypass.dylib: $(DYLIB_DIR)/Tweak.xm.mm
 		-F"$(THEOS_VENDOR_LIB_PATH)" \
 		-framework Foundation -framework UIKit -framework Security \
 		-lobjc -lsubstrate \
-		-o $@ $<
+		-o $@ $^
 
 build-dylib: $(DYLIB_DIR)/DouyinBypass.dylib
 	@mkdir -p packages
