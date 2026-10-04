@@ -5,19 +5,24 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 // ============================================================
-#pragma mark - Backup Directory (app sandbox)
+#pragma mark - Cache Directory (temp dir, like DYYY pattern)
 // ============================================================
 
-NSString *DBGetBackupDir(void) {
+static NSString *DBCacheDirectory(void) {
     static NSString *dir = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        dir = [[paths firstObject] stringByAppendingPathComponent:@"DouyinAccountBackup"];
+        NSString *tmpDir = NSTemporaryDirectory();
+        if (!tmpDir) tmpDir = @"/tmp";
+        dir = [tmpDir stringByAppendingPathComponent:@"DouyinBypass"];
         [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-        DBLog(@"Backup dir: %@", dir);
+        DBLog(@"Cache dir: %@", dir);
     });
     return dir;
+}
+
+NSString *DBGetBackupDir(void) {
+    return DBCacheDirectory();
 }
 
 // ============================================================
@@ -27,7 +32,6 @@ NSString *DBGetBackupDir(void) {
 NSDictionary *DBExtractAccountData(void) {
     NSMutableDictionary *data = [NSMutableDictionary dictionary];
 
-    // 1. UserDefaults (safe)
     @try {
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         NSArray *accountKeys = @[
@@ -58,11 +62,10 @@ NSDictionary *DBExtractAccountData(void) {
         }
         data[@"userDefaults"] = udData;
     } @catch (NSException *e) {
-        DBLog(@"UserDefaults extraction exception: %@", e);
+        DBLog(@"UserDefaults exception: %@", e);
         data[@"userDefaults"] = @{};
     }
 
-    // 2. Keychain (may fail without entitlements)
     @try {
         NSMutableArray *keychainItems = [NSMutableArray array];
         NSArray *secClasses = @[(__bridge id)kSecClassGenericPassword,
@@ -98,11 +101,10 @@ NSDictionary *DBExtractAccountData(void) {
         }
         data[@"keychain"] = keychainItems;
     } @catch (NSException *e) {
-        DBLog(@"Keychain extraction exception: %@", e);
+        DBLog(@"Keychain exception: %@", e);
         data[@"keychain"] = @[];
     }
 
-    // 3. Cookies (safe)
     @try {
         NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
         NSMutableArray *cookies = [NSMutableArray array];
@@ -122,11 +124,10 @@ NSDictionary *DBExtractAccountData(void) {
         }
         data[@"cookies"] = cookies;
     } @catch (NSException *e) {
-        DBLog(@"Cookie extraction exception: %@", e);
+        DBLog(@"Cookie exception: %@", e);
         data[@"cookies"] = @[];
     }
 
-    // 4. Metadata (safe)
     @try {
         data[@"metadata"] = @{
             @"exportTime": @([[NSDate date] timeIntervalSince1970]),
@@ -136,7 +137,7 @@ NSDictionary *DBExtractAccountData(void) {
             @"systemVersion": [[UIDevice currentDevice] systemVersion] ?: @"unknown"
         };
     } @catch (NSException *e) {
-        DBLog(@"Metadata extraction exception: %@", e);
+        DBLog(@"Metadata exception: %@", e);
         data[@"metadata"] = @{};
     }
 
@@ -148,26 +149,28 @@ NSDictionary *DBExtractAccountData(void) {
 }
 
 // ============================================================
-#pragma mark - Export (JSON file to app sandbox)
+#pragma mark - Export (JSON to temp, then document picker)
 // ============================================================
 
 NSString *DBPrepareExportJson(void) {
     @try {
-        NSString *backupDir = DBGetBackupDir();
-        NSString *timestamp = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970]];
-        NSString *fileName = [NSString stringWithFormat:@"douyin_account_%@.json", timestamp];
-        NSString *jsonPath = [backupDir stringByAppendingPathComponent:fileName];
+        NSString *cacheDir = DBCacheDirectory();
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        [formatter setDateFormat:@"yyyyMMdd_HHmmss"];
+        NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+        NSString *fileName = [NSString stringWithFormat:@"DouyinAccount_%@.json", timestamp];
+        NSString *filePath = [cacheDir stringByAppendingPathComponent:fileName];
 
         NSDictionary *accountData = DBExtractAccountData();
         NSError *err = nil;
         NSData *jsonData = [NSJSONSerialization dataWithJSONObject:accountData options:NSJSONWritingPrettyPrinted error:&err];
         if (!jsonData) { DBLog(@"JSON serialization failed: %@", err); return nil; }
 
-        BOOL written = [jsonData writeToFile:jsonPath atomically:YES];
-        if (!written) { DBLog(@"Failed to write JSON to: %@", jsonPath); return nil; }
+        BOOL written = [jsonData writeToFile:filePath atomically:YES];
+        if (!written) { DBLog(@"Failed to write JSON to: %@", filePath); return nil; }
 
-        DBLog(@"Export prepared: %@", jsonPath);
-        return jsonPath;
+        DBLog(@"Export prepared: %@", filePath);
+        return filePath;
     } @catch (NSException *e) {
         DBLog(@"Export exception: %@", e);
         return nil;
@@ -190,7 +193,6 @@ BOOL DBImportAccountFromPath(NSString *filePath) {
         NSDictionary *accountData = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&err];
         if (!accountData) { DBLog(@"JSON parse failed: %@", err); return NO; }
 
-        // Restore UserDefaults
         NSDictionary *udData = accountData[@"userDefaults"];
         if ([udData isKindOfClass:[NSDictionary class]]) {
             NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -198,7 +200,6 @@ BOOL DBImportAccountFromPath(NSString *filePath) {
             [defaults synchronize];
         }
 
-        // Restore Keychain
         NSArray *kcItems = accountData[@"keychain"];
         if ([kcItems isKindOfClass:[NSArray class]]) {
             for (NSDictionary *item in kcItems) {
@@ -216,7 +217,6 @@ BOOL DBImportAccountFromPath(NSString *filePath) {
             }
         }
 
-        // Restore Cookies
         NSArray *cookieData = accountData[@"cookies"];
         if ([cookieData isKindOfClass:[NSArray class]]) {
             NSHTTPCookieStorage *ckStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
@@ -288,11 +288,38 @@ void DBHookAppStoreMediator(void) {
 }
 
 // ============================================================
-#pragma mark - Settings Panel & Entry Item (DY-tools pattern)
+#pragma mark - Document Picker Delegate (DYYY pattern)
 // ============================================================
 
 @interface DBDocumentPickerDelegate : NSObject <UIDocumentPickerDelegate>
+@property(nonatomic, copy) void (^completionBlock)(NSURL *url);
+@property(nonatomic, copy) NSString *tempFilePath;
 @end
+
+@implementation DBDocumentPickerDelegate
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (urls.count > 0 && self.completionBlock) {
+        self.completionBlock(urls.firstObject);
+    }
+    [self cleanupTempFile];
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    [self cleanupTempFile];
+}
+
+- (void)cleanupTempFile {
+    if (self.tempFilePath && [[NSFileManager defaultManager] fileExistsAtPath:self.tempFilePath]) {
+        [[NSFileManager defaultManager] removeItemAtPath:self.tempFilePath error:nil];
+    }
+}
+
+@end
+
+// ============================================================
+#pragma mark - Settings Panel & Entry Item (DY-tools pattern)
+// ============================================================
 
 static UIViewController *DBTopViewController(void) {
     UIWindow *window = nil;
@@ -319,44 +346,90 @@ void DBPresentControlPanel(void) {
             UIAlertController *panel = [UIAlertController alertControllerWithTitle:@"DouyinBypass 账号管理"
                 message:@"选择操作" preferredStyle:UIAlertControllerStyleActionSheet];
 
+            // Export: write JSON to temp, then use UIDocumentPickerViewController to let user pick save location
             [panel addAction:[UIAlertAction actionWithTitle:@"导出当前账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                // Run export on main thread to avoid UIKit threading issues
-                NSString *jsonPath = DBPrepareExportJson();
-                if (!jsonPath) {
-                    UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导出失败" message:@"请检查日志" preferredStyle:UIAlertControllerStyleAlert];
+                NSString *tempFilePath = DBPrepareExportJson();
+                if (!tempFilePath) {
+                    UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导出失败" message:@"无法生成账号数据" preferredStyle:UIAlertControllerStyleAlert];
                     [err addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
                     [DBTopViewController() presentViewController:err animated:YES completion:nil];
                     return;
                 }
-                NSURL *fileURL = [NSURL fileURLWithPath:jsonPath];
-                UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[fileURL]];
-                picker.modalPresentationStyle = UIModalPresentationFormSheet;
-                objc_setAssociatedObject(picker, "db_export_path", jsonPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+                NSURL *tempFileURL = [NSURL fileURLWithPath:tempFilePath];
+                // Use the same API as DYYY: initWithURLs:inMode:UIDocumentPickerModeExportToService
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initWithURLs:@[tempFileURL] inMode:UIDocumentPickerModeExportToService];
+                #pragma clang diagnostic pop
+
                 DBDocumentPickerDelegate *del = [[DBDocumentPickerDelegate alloc] init];
+                del.tempFilePath = tempFilePath;
+                del.completionBlock = ^(NSURL *url) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        UIAlertController *ok = [UIAlertController alertControllerWithTitle:@"导出成功"
+                            message:[NSString stringWithFormat:@"已保存到:\n%@", url.path]
+                            preferredStyle:UIAlertControllerStyleAlert];
+                        [ok addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                        [DBTopViewController() presentViewController:ok animated:YES completion:nil];
+                    });
+                };
+
+                static char kDBPickerDelegateKey;
                 picker.delegate = del;
-                objc_setAssociatedObject(picker, "db_delegate_retain", del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(picker, &kDBPickerDelegateKey, del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
                 [DBTopViewController() presentViewController:picker animated:YES completion:nil];
             }]];
 
+            // Import: let user pick a JSON file
             [panel addAction:[UIAlertAction actionWithTitle:@"导入账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                NSArray<UTType *> *types = @[UTTypeJSON, UTTypeData];
-                UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:YES];
-                picker.modalPresentationStyle = UIModalPresentationFormSheet;
-                picker.allowsMultipleSelection = NO;
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.json", @"public.data"] inMode:UIDocumentPickerModeImport];
+                #pragma clang diagnostic pop
+
                 DBDocumentPickerDelegate *del = [[DBDocumentPickerDelegate alloc] init];
+                del.completionBlock = ^(NSURL *url) {
+                    if (!url) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"未选择文件" preferredStyle:UIAlertControllerStyleAlert];
+                            [err addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                            [DBTopViewController() presentViewController:err animated:YES completion:nil];
+                        });
+                        return;
+                    }
+                    BOOL ok = DBImportAccountFromPath(url.path);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (ok) {
+                            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入成功" message:@"账号信息已恢复，请重启抖音以生效。" preferredStyle:UIAlertControllerStyleAlert];
+                            [a addAction:[UIAlertAction actionWithTitle:@"立即重启" style:UIAlertActionStyleDefault handler:^(UIAlertAction *aa) { exit(0); }]];
+                            [a addAction:[UIAlertAction actionWithTitle:@"稍后重启" style:UIAlertActionStyleCancel handler:nil]];
+                            [DBTopViewController() presentViewController:a animated:YES completion:nil];
+                        } else {
+                            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"文件格式不正确或已损坏" preferredStyle:UIAlertControllerStyleAlert];
+                            [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                            [DBTopViewController() presentViewController:a animated:YES completion:nil];
+                        }
+                    });
+                };
+
+                static char kDBImportPickerDelegateKey;
                 picker.delegate = del;
-                objc_setAssociatedObject(picker, "db_delegate_retain", del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(picker, &kDBImportPickerDelegateKey, del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
                 [DBTopViewController() presentViewController:picker animated:YES completion:nil];
             }]];
 
+            // Backup list
             [panel addAction:[UIAlertAction actionWithTitle:@"查看备份列表" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
                 NSFileManager *fm = [NSFileManager defaultManager];
-                NSString *backupDir = DBGetBackupDir();
-                NSArray *files = [fm contentsOfDirectoryAtPath:backupDir error:nil];
+                NSString *cacheDir = DBCacheDirectory();
+                NSArray *files = [fm contentsOfDirectoryAtPath:cacheDir error:nil];
                 NSMutableArray *info = [NSMutableArray array];
                 for (NSString *f in files) {
                     if ([f hasSuffix:@".json"]) {
-                        NSString *full = [backupDir stringByAppendingPathComponent:f];
+                        NSString *full = [cacheDir stringByAppendingPathComponent:f];
                         NSDictionary *attr = [fm attributesOfItemAtPath:full error:nil];
                         unsigned long long size = attr.fileSize;
                         NSDate *date = attr.fileModificationDate;
@@ -370,8 +443,8 @@ void DBPresentControlPanel(void) {
                 UIAlertController *list = [UIAlertController alertControllerWithTitle:@"备份列表" message:msg preferredStyle:UIAlertControllerStyleAlert];
                 if (info.count > 0) {
                     [list addAction:[UIAlertAction actionWithTitle:@"清除所有备份" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *aa) {
-                        [fm removeItemAtPath:backupDir error:nil];
-                        [fm createDirectoryAtPath:backupDir withIntermediateDirectories:YES attributes:nil error:nil];
+                        [fm removeItemAtPath:cacheDir error:nil];
+                        [fm createDirectoryAtPath:cacheDir withIntermediateDirectories:YES attributes:nil error:nil];
                     }]];
                 }
                 [list addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
@@ -386,65 +459,10 @@ void DBPresentControlPanel(void) {
             }
             [presenter presentViewController:panel animated:YES completion:nil];
         } @catch (NSException *e) {
-            DBLog(@"Panel presentation exception: %@", e);
+            DBLog(@"Panel exception: %@", e);
         }
     });
 }
-
-@implementation DBDocumentPickerDelegate
-
-- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    @try {
-        NSString *exportPath = objc_getAssociatedObject(controller, "db_export_path");
-        if (exportPath) {
-            objc_setAssociatedObject(controller, "db_export_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            NSString *msg = [NSString stringWithFormat:@"已保存到:\n%@", urls.firstObject.path];
-            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导出成功" message:msg preferredStyle:UIAlertControllerStyleAlert];
-            [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-            [DBTopViewController() presentViewController:a animated:YES completion:nil];
-            return;
-        }
-
-        NSURL *pickedURL = urls.firstObject;
-        if (!pickedURL) return;
-        BOOL scoped = [pickedURL startAccessingSecurityScopedResource];
-
-        NSString *tempPath = [DBGetBackupDir() stringByAppendingPathComponent:@"import_picked.json"];
-        [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
-        NSError *copyErr = nil;
-        [[NSFileManager defaultManager] copyItemAtURL:pickedURL toURL:[NSURL fileURLWithPath:tempPath] error:&copyErr];
-        if (scoped) [pickedURL stopAccessingSecurityScopedResource];
-
-        if (copyErr) {
-            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入失败" message:copyErr.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-            [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-            [DBTopViewController() presentViewController:a animated:YES completion:nil];
-            return;
-        }
-
-        BOOL ok = DBImportAccountFromPath(tempPath);
-        [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
-
-        if (ok) {
-            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入成功" message:@"账号信息已恢复，请重启抖音以生效。" preferredStyle:UIAlertControllerStyleAlert];
-            [a addAction:[UIAlertAction actionWithTitle:@"立即重启" style:UIAlertActionStyleDefault handler:^(UIAlertAction *aa) { exit(0); }]];
-            [a addAction:[UIAlertAction actionWithTitle:@"稍后重启" style:UIAlertActionStyleCancel handler:nil]];
-            [DBTopViewController() presentViewController:a animated:YES completion:nil];
-        } else {
-            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"文件格式不正确或已损坏" preferredStyle:UIAlertControllerStyleAlert];
-            [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-            [DBTopViewController() presentViewController:a animated:YES completion:nil];
-        }
-    } @catch (NSException *e) {
-        DBLog(@"DocumentPicker exception: %@", e);
-    }
-}
-
-- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
-    objc_setAssociatedObject(controller, "db_export_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
-@end
 
 id DBMakeSettingsEntryItem(void) {
     Class itemClass = NSClassFromString(@"AWESettingItemModel");
@@ -454,7 +472,7 @@ id DBMakeSettingsEntryItem(void) {
     item.identifier = @"DouyinBypassAccountManager";
     item.title = @"账号管理";
     item.subTitle = @"导出/导入账号登录信息";
-    item.detail = @"v2.2";
+    item.detail = @"v2.3";
     item.iconImageName = @"ic_gearsimplify_outlined_20";
     item.svgIconImageName = @"ic_gearsimplify_outlined_20";
     item.cellType = 26;
