@@ -208,9 +208,11 @@ static NSData *DBInflateData(const void *compData, size_t compSize, size_t uncom
 
 static BOOL DBExtractZip(NSString *zipPath, NSString *dstDir) {
     FILE *zf = fopen([zipPath UTF8String], "rb");
-    if (!zf) return NO;
+    if (!zf) { DBLog(@"Cannot open zip: %@", zipPath); return NO; }
     fseek(zf, 0, SEEK_END);
     long fsz = ftell(zf);
+    DBLog(@"ZIP file size: %ld", fsz);
+    if (fsz < 22) { DBLog(@"ZIP too small"); fclose(zf); return NO; }
     long ss = fsz - 65557; if (ss < 0) ss = 0;
     uint8_t *buf = (uint8_t *)malloc(fsz - ss);
     fseek(zf, ss, SEEK_SET);
@@ -220,8 +222,9 @@ static BOOL DBExtractZip(NSString *zipPath, NSString *dstDir) {
         if (buf[i]==0x50 && buf[i+1]==0x4b && buf[i+2]==0x05 && buf[i+3]==0x06) { eo = ss+i; break; }
     }
     free(buf);
-    if (eo < 0) { fclose(zf); return NO; }
-    fseek(zf, eo+10, SEEK_SET);
+    if (eo < 0) { DBLog(@"EOCD not found"); fclose(zf); return NO; }
+    DBLog(@"EOCD at offset: %ld", eo);
+    fseek(zf, eo+10, SEEK_SET); // total entries
     uint16_t tot; fread(&tot, 2, 1, zf);
     fseek(zf, 6, SEEK_CUR);
     uint32_t cdOff; fread(&cdOff, 4, 1, zf);
@@ -291,7 +294,7 @@ static BOOL DBExtractZip(NSString *zipPath, NSString *dstDir) {
         fseek(zf, sv, SEEK_SET);
     }
     fclose(zf);
-    DBLog(@"ZIP extracted: %d files", tot);
+    DBLog(@"ZIP extracted: %d files to %@", tot, dstDir);
     return YES;
 }
 
@@ -331,7 +334,7 @@ BOOL DBImportAccountFromPath(NSString *filePath) {
         if (![[NSFileManager defaultManager] fileExistsAtPath:filePath]) return NO;
         NSString *extDir = [DBCacheDir() stringByAppendingPathComponent:@"import_extract"];
         [[NSFileManager defaultManager] removeItemAtPath:extDir error:nil];
-        if (!DBExtractZip(filePath, extDir)) return NO;
+        if (!DBExtractZip(filePath, extDir)) { DBLog(@"Extract failed for: %@", filePath); return NO; }
         NSInteger dc = DBRestoreFilesToRoot(extDir, DBAppDocumentsDir(), @"Documents");
         NSInteger lc = DBRestoreFilesToRoot(extDir, DBAppLibraryDir(), @"Library");
         [[NSFileManager defaultManager] removeItemAtPath:extDir error:nil];
@@ -548,6 +551,8 @@ NSArray *DBInjectSettingsSections(NSArray *orig) {
     [r insertObject:section atIndex:0];
     return [r copy];
 }
+
+
 
 
 
