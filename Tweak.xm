@@ -5,6 +5,7 @@
 #import <Security/Security.h>
 #import <CommonCrypto/CommonCrypto.h>
 #import <mach-o/dyld.h>
+#include <stdlib.h>
 
 // DouyinBypass v2.1.0
 // Target: com.ss.iphone.ugc.Aweme (Douyin)
@@ -19,7 +20,7 @@
 #define DB_SECTION_ROW_COUNT 3
 
 // ============================================================
-#pragma mark - Forward Declarations & C Helpers (BEFORE any %hook)
+#pragma mark - ALL C functions and structs (before ANY @interface or %hook)
 // ============================================================
 
 typedef struct {
@@ -29,18 +30,14 @@ typedef struct {
 } DBMenuItem;
 
 static DBMenuItem gDBMenuItems[] = {
-    {"♡", "导出账号信息", "保存"},
-    {"☆", "导入账号信息", "选择"},
-    {"☁", "查看备份列表", "管理"},
+    {"\xe2\x99\xa1", "\xe5\xaf\xbc\xe5\x87\xba\xe8\xb4\xa6\xe5\x8f\xb7\xe4\xbf\xa1\xe6\x81\xaf", "\xe4\xbf\x9d\xe5\xad\x98"},
+    {"\xe2\x98\x86", "\xe5\xaf\xbc\xe5\x85\xa5\xe8\xb4\xa6\xe5\x8f\xb7\xe4\xbf\xa1\xe6\x81\xaf", "\xe9\x80\x89\xe6\x8b\xa9"},
+    {"\xe2\x98\x81", "\xe6\x9f\xa5\xe7\x9c\x8b\xe5\xa4\x87\xe4\xbb\xbd\xe5\x88\x97\xe8\xa1\xa8", "\xe7\xae\xa1\xe7\x90\x86"},
 };
 
 static NSInteger DBRealSection(NSInteger displaySection) {
     return displaySection - 1;
 }
-
-// ============================================================
-#pragma mark - Account Data Extraction
-// ============================================================
 
 static NSDictionary *DBExtractAccountData(void) {
     NSMutableDictionary *data = [NSMutableDictionary dictionary];
@@ -143,33 +140,18 @@ static NSDictionary *DBExtractAccountData(void) {
     return [data copy];
 }
 
-// ============================================================
-#pragma mark - ZIP Helpers
-// ============================================================
-
 static BOOL DBCreateZipFromDirectory(NSString *srcDir, NSString *dstZip) {
-    NSTask *task = [[NSTask alloc] init];
-    task.launchPath = @"/usr/bin/zip";
-    task.arguments = @[@"-r", @"-j", dstZip, srcDir];
-    task.currentDirectoryPath = [srcDir stringByDeletingLastPathComponent];
-    [task launch];
-    [task waitUntilExit];
-    return task.terminationStatus == 0 && [[NSFileManager defaultManager] fileExistsAtPath:dstZip];
+    NSString *cmd = [NSString stringWithFormat:@"/usr/bin/zip -r -j '%@' '%@'", dstZip, srcDir];
+    int ret = system([cmd UTF8String]);
+    return ret == 0 && [[NSFileManager defaultManager] fileExistsAtPath:dstZip];
 }
 
 static BOOL DBUnzipToDirectory(NSString *srcZip, NSString *dstDir) {
     [[NSFileManager defaultManager] createDirectoryAtPath:dstDir withIntermediateDirectories:YES attributes:nil error:nil];
-    NSTask *task = [[NSTask alloc] init];
-    task.launchPath = @"/usr/bin/unzip";
-    task.arguments = @[@"-o", srcZip, @"-d", dstDir];
-    [task launch];
-    [task waitUntilExit];
-    return task.terminationStatus == 0;
+    NSString *cmd = [NSString stringWithFormat:@"/usr/bin/unzip -o '%@' -d '%@'", srcZip, dstDir];
+    int ret = system([cmd UTF8String]);
+    return ret == 0;
 }
-
-// ============================================================
-#pragma mark - Export & Import
-// ============================================================
 
 static NSString *DBPrepareExportZip(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -232,7 +214,7 @@ static BOOL DBImportAccountFromPath(NSString *zipPath) {
     }
 
     NSArray *cookieData = accountData[@"cookies"];
-    NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+    NSHTTPCookieStorage *ckStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     for (NSDictionary *cd in cookieData) {
         NSMutableDictionary *props = [NSMutableDictionary dictionary];
         props[NSHTTPCookieName] = cd[@"name"];
@@ -243,7 +225,7 @@ static BOOL DBImportAccountFromPath(NSString *zipPath) {
         double exp = [cd[@"expiresDate"] doubleValue];
         if (exp > 0) props[NSHTTPCookieExpires] = [NSDate dateWithTimeIntervalSince1970:exp];
         NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
-        if (cookie) [storage setCookie:cookie];
+        if (cookie) [ckStorage setCookie:cookie];
     }
 
     [fm removeItemAtPath:tempDir error:nil];
@@ -251,8 +233,32 @@ static BOOL DBImportAccountFromPath(NSString *zipPath) {
     return YES;
 }
 
+static BOOL _db_isAppStoreChannel(id self, SEL _cmd) {
+    return YES;
+}
+
+static void DBHookIsAppStoreChannel(void) {
+    NSArray *classNames = @[
+        @"AWEAppEnvironment", @"AWESecUserModel", @"AWEConfigManager",
+        @"BDUGCloudkitManager", @"AWEAppStoreMediator", @"TTAccountSDKSetup"
+    ];
+    for (NSString *clsName in classNames) {
+        Class cls = NSClassFromString(clsName);
+        if (cls && [cls instancesRespondToSelector:@selector(isAppStoreChannel)]) {
+            MSHookMessageEx(cls, @selector(isAppStoreChannel),
+                           (IMP)_db_isAppStoreChannel, NULL);
+            DBLog(@"Hooked isAppStoreChannel on %@", clsName);
+        }
+        if (cls && [cls respondsToSelector:@selector(isAppStoreChannel)]) {
+            MSHookMessageEx(object_getClass(cls), @selector(isAppStoreChannel),
+                           (IMP)_db_isAppStoreChannel, NULL);
+            DBLog(@"Hooked +isAppStoreChannel on %@", clsName);
+        }
+    }
+}
+
 // ============================================================
-#pragma mark - Bypass Hooks (specific classes only, NO NSObject)
+#pragma mark - Bypass Hooks
 // ============================================================
 
 @interface BDUGCloudkitManager : NSObject
@@ -261,8 +267,11 @@ static BOOL DBImportAccountFromPath(NSString *zipPath) {
 @end
 
 %hook BDUGCloudkitManager
-- (BOOL)isValidMobileProvision { return YES; }
-- (void)setupCloudKit {}
+- (BOOL)isValidMobileProvision {
+    return YES;
+}
+- (void)setupCloudKit {
+}
 %end
 
 @interface AWEAccountForceUpgradeManager : NSObject
@@ -273,9 +282,13 @@ static BOOL DBImportAccountFromPath(NSString *zipPath) {
 @end
 
 %hook AWEAccountForceUpgradeManager
-- (void)checkForceUpgrade {}
-- (void)showForceUpgradeDialog {}
-- (BOOL)shouldForceUpgrade { return NO; }
+- (void)checkForceUpgrade {
+}
+- (void)showForceUpgradeDialog {
+}
+- (BOOL)shouldForceUpgrade {
+    return NO;
+}
 %end
 
 @interface AWEAppStoreMediator : NSObject
@@ -298,35 +311,10 @@ static BOOL DBImportAccountFromPath(NSString *zipPath) {
 @end
 
 %hook TTAccountSDKSetup
-+ (void)startWithConfig:(id)config { %orig; }
++ (void)startWithConfig:(id)config {
+    %orig;
+}
 %end
-
-// isAppStoreChannel: use MSHookMessageEx instead of %hook NSObject
-static BOOL _db_isAppStoreChannel(id self, SEL _cmd) {
-    return YES;
-}
-
-static void DBHookIsAppStoreChannel(void) {
-    // Hook on common Douyin classes that implement isAppStoreChannel
-    NSArray *classNames = @[
-        @"AWEAppEnvironment", @"AWESecUserModel", @"AWEConfigManager",
-        @"BDUGCloudkitManager", @"AWEAppStoreMediator", @"TTAccountSDKSetup"
-    ];
-    for (NSString *clsName in classNames) {
-        Class cls = NSClassFromString(clsName);
-        if (cls && [cls instancesRespondToSelector:@selector(isAppStoreChannel)]) {
-            MSHookMessageEx(cls, @selector(isAppStoreChannel),
-                           (IMP)_db_isAppStoreChannel, NULL);
-            DBLog(@"Hooked isAppStoreChannel on %@", clsName);
-        }
-        // Also check class method
-        if (cls && [cls respondsToSelector:@selector(isAppStoreChannel)]) {
-            MSHookMessageEx(object_getClass(cls), @selector(isAppStoreChannel),
-                           (IMP)_db_isAppStoreChannel, NULL);
-            DBLog(@"Hooked +isAppStoreChannel on %@", clsName);
-        }
-    }
-}
 
 // ============================================================
 #pragma mark - Settings Section Injection (Native Style)
