@@ -1,8 +1,8 @@
 Package: com.douyin.bypass
 Name: DouyinBypass
 Depends: mobilesubstrate, zip
-Version: 2.1.0
+Version: 2.2.0
 Architecture: iphoneos-arm
-Description: Bypass Douyin version check + Account backup/restore with native settings UI and document picker export/import.
+Description: Bypass Douyin version check + Account backup/restore with native settings entry (DY-tools pattern).
 Author: LocalDev
 Section: Tweaks

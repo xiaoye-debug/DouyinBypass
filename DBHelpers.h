@@ -6,33 +6,56 @@
 
 #define BACKUP_DIR @"/var/mobile/Documents/DouyinAccountBackup"
 #define BACKUP_FILENAME_FMT @"douyin_account_%@.zip"
-#define DB_INJECTED_SECTION 0
-#define DB_SECTION_ROW_COUNT 3
-
-typedef struct {
-    const char *icon;
-    const char *title;
-    const char *detail;
-} DBMenuItem;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-extern DBMenuItem gDBMenuItems[];
-
-NSInteger DBRealSection(NSInteger displaySection);
-NSDictionary *DBExtractAccountData(void);
 NSString *DBPrepareExportZip(void);
 BOOL DBImportAccountFromPath(NSString *zipPath);
 void DBHookIsAppStoreChannel(void);
 void DBHookAppStoreMediator(void);
 
+// Settings injection (called from %ctor via MSHookMessageEx or from %hook)
+id DBMakeSettingsEntryItem(void);
+id DBMakeSettingsSection(id entryItem);
+NSArray *DBInjectSettingsSections(NSArray *originalSections);
+void DBPresentControlPanel(void);
+
 #ifdef __cplusplus
 }
 #endif
 
-// Class declarations with block-typed parameters (must be outside .xm to avoid Logos parsing issues)
+// Douyin settings model classes (declared here to keep .xm clean of block syntax)
+@interface AWESettingItemModel : NSObject
+@property(nonatomic,copy) NSString *identifier;
+@property(nonatomic,copy) NSString *title;
+@property(nonatomic,copy) NSString *subTitle;
+@property(nonatomic,copy) NSString *detail;
+@property(nonatomic,copy) NSString *svgIconImageName;
+@property(nonatomic,copy) NSString *iconImageName;
+@property(nonatomic,assign) NSInteger cellType;
+@property(nonatomic,assign) NSInteger colorStyle;
+@property(nonatomic,assign) BOOL isEnable;
+@property(nonatomic,assign) BOOL isSwitchOn;
+@property(nonatomic,copy) void (^cellTappedBlock)(void);
+@property(nonatomic,copy) void (^switchChangedBlock)(void);
+@end
+
+@interface AWESettingSectionModel : NSObject
+@property(nonatomic,copy) NSString *sectionHeaderTitle;
+@property(nonatomic,assign) CGFloat sectionHeaderHeight;
+@property(nonatomic,copy) NSString *sectionFooterTitle;
+@property(nonatomic,assign) NSInteger type;
+@property(nonatomic,strong) NSArray *itemArray;
+@end
+
+@interface AWESettingsViewModel : NSObject
+@property(nonatomic,strong) NSArray *sectionDataArray;
+@property(nonatomic,assign) NSInteger colorStyle;
+@end
+
+// Bypass target classes
 @interface BDUGCloudkitManager : NSObject
 - (BOOL)isValidMobileProvision;
 - (void)setupCloudKit;
@@ -53,10 +76,4 @@ void DBHookAppStoreMediator(void);
 
 @interface TTAccountSDKSetup : NSObject
 + (void)startWithConfig:(id)config;
-@end
-
-@interface AWESettingsViewController : UIViewController <UITableViewDataSource, UITableViewDelegate, UIDocumentPickerDelegate>
-- (UITableViewCell *)db_cellForInjectedRow:(UITableView *)tv indexPath:(NSIndexPath *)ip;
-- (void)db_handleInjectedSelection:(NSInteger)row fromVC:(UIViewController *)vc tableView:(UITableView *)tv;
-- (void)db_showBackupListFromVC:(UIViewController *)vc;
 @end

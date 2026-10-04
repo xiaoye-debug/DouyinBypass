@@ -7,12 +7,12 @@ include $(THEOS)/makefiles/common.mk
 # === Tweak (DEB for jailbreak) ===
 TWEAK_NAME = DouyinBypass
 DouyinBypass_FILES = Tweak.xm DBHelpers.m
-DouyinBypass_CFLAGS = -fobjc-arc
+DouyinBypass_CFLAGS = -fobjc-arc -w
 DouyinBypass_FRAMEWORKS = Foundation UIKit Security UniformTypeIdentifiers
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
-# === Build dylib: just copy the already-linked tweak dylib ===
+# === Build dylib: copy the already-linked tweak dylib ===
 build-dylib:
 	@echo "=== Building Dylib for IPA injection ==="
 	@mkdir -p packages

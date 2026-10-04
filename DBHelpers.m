@@ -2,6 +2,7 @@
 #import <Security/Security.h>
 #import <objc/runtime.h>
 #import <substrate.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <spawn.h>
 #include <sys/wait.h>
 
@@ -261,5 +262,224 @@ void DBHookAppStoreMediator(void) {
     MSHookMessageEx(cls, @selector(openURL:completion:), (IMP)_db_openURL, NULL);
     MSHookMessageEx(cls, @selector(initSKStoreProductVCWithCompletion:), (IMP)_db_initSKStore, NULL);
     DBLog(@"Hooked AWEAppStoreMediator openURL + initSKStore");
+}
+
+
+
+@class DBDocumentPickerDelegate;
+
+// ============================================================
+#pragma mark - Settings Panel & Entry Item (DY-tools pattern)
+// ============================================================
+
+static UIViewController *DBTopViewController(void) {
+    UIWindow *window = nil;
+    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (scene.activationState == UISceneActivationStateForegroundActive) {
+            for (UIWindow *w in scene.windows) {
+                if (w.isKeyWindow) { window = w; break; }
+            }
+        }
+        if (window) break;
+    }
+    if (!window) window = [UIApplication sharedApplication].keyWindow;
+    UIViewController *vc = window.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    return vc;
+}
+
+void DBPresentControlPanel(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *presenter = DBTopViewController();
+        if (!presenter) return;
+
+        UIAlertController *panel = [UIAlertController alertControllerWithTitle:@"DouyinBypass 账号管理"
+            message:@"选择操作" preferredStyle:UIAlertControllerStyleActionSheet];
+
+        [panel addAction:[UIAlertAction actionWithTitle:@"导出当前账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                NSString *zipPath = DBPrepareExportZip();
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (!zipPath) {
+                        UIAlertController *err = [UIAlertController alertControllerWithTitle:@"导出失败" message:@"请检查日志" preferredStyle:UIAlertControllerStyleAlert];
+                        [err addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                        [DBTopViewController() presentViewController:err animated:YES completion:nil];
+                        return;
+                    }
+                    NSURL *fileURL = [NSURL fileURLWithPath:zipPath];
+                    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[fileURL]];
+                    picker.modalPresentationStyle = UIModalPresentationFormSheet;
+                    objc_setAssociatedObject(picker, "db_export_zip_path", zipPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    // Use a delegate proxy to handle the picker result
+                    DBDocumentPickerDelegate *del = [[DBDocumentPickerDelegate alloc] init];
+                    picker.delegate = del;
+                    objc_setAssociatedObject(picker, "db_delegate_retain", del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    [DBTopViewController() presentViewController:picker animated:YES completion:nil];
+                });
+            });
+        }]];
+
+        [panel addAction:[UIAlertAction actionWithTitle:@"导入账号信息" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            NSArray<UTType *> *types = @[[UTType typeWithIdentifier:@"com.pkware.zip-archive"] ?: UTTypeData, UTTypeData];
+            UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:YES];
+            picker.modalPresentationStyle = UIModalPresentationFormSheet;
+            picker.allowsMultipleSelection = NO;
+            DBDocumentPickerDelegate *del = [[DBDocumentPickerDelegate alloc] init];
+            picker.delegate = del;
+            objc_setAssociatedObject(picker, "db_delegate_retain", del, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [DBTopViewController() presentViewController:picker animated:YES completion:nil];
+        }]];
+
+        [panel addAction:[UIAlertAction actionWithTitle:@"查看备份列表" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            NSFileManager *fm = [NSFileManager defaultManager];
+            NSArray *files = [fm contentsOfDirectoryAtPath:BACKUP_DIR error:nil];
+            NSMutableArray *info = [NSMutableArray array];
+            for (NSString *f in files) {
+                if ([f hasSuffix:@".zip"]) {
+                    NSString *full = [BACKUP_DIR stringByAppendingPathComponent:f];
+                    NSDictionary *attr = [fm attributesOfItemAtPath:full error:nil];
+                    unsigned long long size = attr.fileSize;
+                    NSDate *date = attr.fileModificationDate;
+                    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+                    fmt.dateFormat = @"yyyy-MM-dd HH:mm";
+                    [info addObject:[NSString stringWithFormat:@"%@  (%.1f KB, %@)", f, size/1024.0, [fmt stringFromDate:date]]];
+                }
+            }
+            [info sortUsingSelector:@selector(compare:)];
+            NSString *msg = info.count > 0 ? [[info reverseObjectEnumerator].allObjects componentsJoinedByString:@"\n\n"] : @"暂无备份文件";
+            UIAlertController *list = [UIAlertController alertControllerWithTitle:@"备份列表" message:msg preferredStyle:UIAlertControllerStyleAlert];
+            if (info.count > 0) {
+                [list addAction:[UIAlertAction actionWithTitle:@"清除所有备份" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *aa) {
+                    [fm removeItemAtPath:BACKUP_DIR error:nil];
+                    [fm createDirectoryAtPath:BACKUP_DIR withIntermediateDirectories:YES attributes:nil error:nil];
+                }]];
+            }
+            [list addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+            [DBTopViewController() presentViewController:list animated:YES completion:nil];
+        }]];
+
+        [panel addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+        if (panel.popoverPresentationController) {
+            panel.popoverPresentationController.sourceView = presenter.view;
+            panel.popoverPresentationController.sourceRect = CGRectMake(presenter.view.bounds.size.width/2, presenter.view.bounds.size.height/2, 1, 1);
+        }
+        [presenter presentViewController:panel animated:YES completion:nil];
+    });
+}
+
+// Document picker delegate (separate class to avoid block-in-.xm issues)
+@interface DBDocumentPickerDelegate : NSObject <UIDocumentPickerDelegate>
+@end
+
+@implementation DBDocumentPickerDelegate
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSString *exportZip = objc_getAssociatedObject(controller, "db_export_zip_path");
+    if (exportZip) {
+        objc_setAssociatedObject(controller, "db_export_zip_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSString *msg = [NSString stringWithFormat:@"已保存到:\n%@", urls.firstObject.path];
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导出成功" message:msg preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+        [DBTopViewController() presentViewController:a animated:YES completion:nil];
+        return;
+    }
+
+    NSURL *pickedURL = urls.firstObject;
+    if (!pickedURL) return;
+    BOOL scoped = [pickedURL startAccessingSecurityScopedResource];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *tempPath = [BACKUP_DIR stringByAppendingPathComponent:@"import_picked.zip"];
+        [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
+        NSError *copyErr = nil;
+        [[NSFileManager defaultManager] copyItemAtURL:pickedURL toURL:[NSURL fileURLWithPath:tempPath] error:&copyErr];
+        if (scoped) [pickedURL stopAccessingSecurityScopedResource];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (copyErr) {
+                UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入失败" message:copyErr.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+                [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                [DBTopViewController() presentViewController:a animated:YES completion:nil];
+                return;
+            }
+            BOOL ok = DBImportAccountFromPath(tempPath);
+            [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
+            if (ok) {
+                UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入成功" message:@"账号信息已恢复，请重启抖音以生效。" preferredStyle:UIAlertControllerStyleAlert];
+                [a addAction:[UIAlertAction actionWithTitle:@"立即重启" style:UIAlertActionStyleDefault handler:^(UIAlertAction *aa) { exit(0); }]];
+                [a addAction:[UIAlertAction actionWithTitle:@"稍后重启" style:UIAlertActionStyleCancel handler:nil]];
+                [DBTopViewController() presentViewController:a animated:YES completion:nil];
+            } else {
+                UIAlertController *a = [UIAlertController alertControllerWithTitle:@"导入失败" message:@"文件格式不正确或已损坏" preferredStyle:UIAlertControllerStyleAlert];
+                [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                [DBTopViewController() presentViewController:a animated:YES completion:nil];
+            }
+        });
+    });
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    objc_setAssociatedObject(controller, "db_export_zip_path", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+@end
+
+id DBMakeSettingsEntryItem(void) {
+    Class itemClass = NSClassFromString(@"AWESettingItemModel");
+    if (!itemClass) return nil;
+
+    AWESettingItemModel *item = [itemClass new];
+    item.identifier = @"DouyinBypassAccountManager";
+    item.title = @"账号管理";
+    item.subTitle = @"导出/导入账号登录信息";
+    item.detail = @"v2.2";
+    item.iconImageName = @"ic_gearsimplify_outlined_20";
+    item.svgIconImageName = @"ic_gearsimplify_outlined_20";
+    item.cellType = 26;
+    item.colorStyle = 0;
+    item.isEnable = YES;
+    item.isSwitchOn = NO;
+    item.cellTappedBlock = ^{
+        DBPresentControlPanel();
+    };
+    return item;
+}
+
+id DBMakeSettingsSection(id entryItem) {
+    Class sectionClass = NSClassFromString(@"AWESettingSectionModel");
+    if (!sectionClass || !entryItem) return nil;
+
+    AWESettingSectionModel *section = [sectionClass new];
+    section.sectionHeaderTitle = @"DouyinBypass";
+    section.sectionHeaderHeight = 40.0;
+    section.sectionFooterTitle = @"";
+    section.type = 0;
+    section.itemArray = @[entryItem];
+    return section;
+}
+
+NSArray *DBInjectSettingsSections(NSArray *originalSections) {
+    if (![originalSections isKindOfClass:[NSArray class]]) return originalSections;
+
+    // Check if already injected
+    for (id section in originalSections) {
+        NSArray *items = nil;
+        @try { items = [section valueForKey:@"itemArray"]; } @catch (__unused NSException *e) {}
+        for (id item in items) {
+            NSString *identifier = nil;
+            @try { identifier = [item valueForKey:@"identifier"]; } @catch (__unused NSException *e) {}
+            if ([identifier isEqualToString:@"DouyinBypassAccountManager"]) return originalSections;
+        }
+    }
+
+    id entry = DBMakeSettingsEntryItem();
+    id section = DBMakeSettingsSection(entry);
+    if (!entry || !section) return originalSections;
+
+    NSMutableArray *result = [originalSections mutableCopy];
+    if (!result) result = [NSMutableArray array];
+    [result insertObject:section atIndex:0];
+    return [result copy];
 }
 
